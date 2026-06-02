@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "abacuskit"
+version = "1.0.0"
+description = "Integrated ABACUS + DeepMD workflow command line toolkit"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+  {name = "Han Enci"},
+  {name = "Zhong Lisheng"},
+  {name = "Yu Yutong"},
+  {name = "Xu Mengting"},
+  {name = "Chen Jingyuan"}
+]
+dependencies = [
+  "ase",
+  "numpy",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Scientific/Engineering :: Chemistry",
+  "Topic :: Scientific/Engineering :: Physics",
+]
+
+[project.optional-dependencies]
+deepmd = ["dpdata"]
+plot = ["matplotlib"]
+dev = ["build", "twine"]
+
+[project.scripts]
+abacuskit = "abacuskit.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["abacuskit*"]

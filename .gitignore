@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Generated ABACUS/DeepMD outputs
+OUT.*/
+*.log
+run_cmd.txt
+DONE
+metrics.json
+metrics.csv
+abacuskit_report.html
+# Local generated examples
+example/run_single_gpu_test/
