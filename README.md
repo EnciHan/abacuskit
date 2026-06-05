@@ -4,9 +4,14 @@
 
 `abacuskit` 是一个集成式 ABACUS + DeepMD 命令行程序，用于生成 ABACUS 输入文件、准备批量任务、检查/汇总计算结果，并把 ABACUS 输出转换为 DeepMD 数据。
 
-- Version: v1.1.0
+- Version: v1.1.1
 - Author: Han Enci, Zhong Lisheng, Yu Yutong, Xu Mengting, Chen Jingyuan
 - Affiliation: Xi'an University of Technology
+
+## v1.1.1 更新记录
+
+- 修复 `cell-relax` / relax 任务中前面步骤出现 `not converged`、但最终日志显示 `Relaxation is converged!` 时被误判为未收敛的问题。
+- 多个 `running_*.log` 存在时，优先检查最新日志。
 
 ## v1.1 更新记录
 

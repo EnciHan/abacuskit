@@ -31,7 +31,7 @@ from ase.io import read, write
 try:
     from . import __affiliation__, __author__, __version__
 except ImportError:
-    __version__ = "v1.1.0"
+    __version__ = "v1.1.1"
     __author__ = "Han Enci, Zhong Lisheng, Yu Yutong, Xu Mengting, Chen Jingyuan"
     __affiliation__ = "Xi'an University of Technology"
 
@@ -968,9 +968,18 @@ def find_running_log(job: Path) -> Path | None:
     if outdir:
         logs = sorted(outdir.glob("running_*.log"))
         if logs:
-            return logs[0]
+            return max(logs, key=lambda p: (p.stat().st_mtime, natural_key(p.name)))
     direct = sorted(job.glob("running_*.log"))
-    return direct[0] if direct else None
+    return max(direct, key=lambda p: (p.stat().st_mtime, natural_key(p.name))) if direct else None
+
+
+def last_pattern_position(text: str, patterns: list[str]) -> int:
+    last = -1
+    for pattern in patterns:
+        matches = list(re.finditer(pattern, text, flags=re.IGNORECASE))
+        if matches:
+            last = max(last, matches[-1].start())
+    return last
 
 
 def parse_last_iter_energy(text: str) -> float | None:
@@ -1030,25 +1039,30 @@ def parse_abacus_status(job: Path) -> dict:
     lower = text.lower()
     row["finished"] = "finish time" in lower or "total  time" in lower
     negative = [
-        "scf is not converged",
-        "not converged",
-        "convergence has not been achieved",
-        "convergence has not achieved",
-        "convergence has not been reached",
-        "warning_quit",
-        "segmentation fault",
+        r"scf\s+is\s+not\s+converged",
+        r"\bnot\s+converged\b",
+        r"convergence\s+has\s+not\s+been\s+achieved",
+        r"convergence\s+has\s+not\s+achieved",
+        r"convergence\s+has\s+not\s+been\s+reached",
     ]
-    row["failed"] = any(pat in lower for pat in negative) or bool(
+    hard_failed = any(pat in lower for pat in ["warning_quit", "segmentation fault"]) or bool(
         re.search(r"(^|\n)\s*(error|fatal)\b", text, flags=re.IGNORECASE)
     )
     positive = [
-        "charge density convergence is achieved",
-        "convergence is achieved",
-        "relaxation is converged",
-        "geometry optimization is converged",
-        "force convergence is achieved",
+        r"charge\s+density\s+convergence\s+is\s+achieved",
+        r"\bconvergence\s+is\s+achieved",
+        r"relaxation\s+is\s+converged",
+        r"cell\s+relaxation\s+is\s+converged",
+        r"cell-relax\s+is\s+converged",
+        r"lattice\s+relaxation\s+is\s+converged",
+        r"geometry\s+optimization\s+is\s+converged",
+        r"force\s+convergence\s+is\s+achieved",
+        r"stress\s+convergence\s+is\s+achieved",
     ]
-    row["converged"] = any(pat in lower for pat in positive) and not row["failed"]
+    last_negative = last_pattern_position(text, negative)
+    last_positive = last_pattern_position(text, positive)
+    row["converged"] = last_positive >= 0 and not hard_failed and last_positive > last_negative
+    row["failed"] = hard_failed or (last_negative >= 0 and last_negative > last_positive)
 
     row["energy_ev"] = parse_final_energy(text)
     if row["energy_ev"] is None and row["converged"]:
