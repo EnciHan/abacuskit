@@ -31,7 +31,7 @@ from ase.io import read, write
 try:
     from . import __affiliation__, __author__, __version__
 except ImportError:
-    __version__ = "v1.0.0"
+    __version__ = "v1.1.0"
     __author__ = "Han Enci, Zhong Lisheng, Yu Yutong, Xu Mengting, Chen Jingyuan"
     __affiliation__ = "Xi'an University of Technology"
 
@@ -463,9 +463,10 @@ def make_input(
         ("mixing_ndim", 20),
         ("cal_force", 1),
         ("cal_stress", 1 if cal_stress else 0),
-        ("out_chg", 0),
         ("out_wfc_lcao", 0),
     ]
+    if "out_chg" not in extra:
+        params.append(("out_chg", 0))
     if calculation == "md":
         params += [
             ("md_nstep", extra.pop("md_nstep", "1000")),
@@ -517,9 +518,10 @@ def input_template_params(args) -> list[tuple[str, object]]:
         ("mixing_ndim", 20),
         ("cal_force", 1),
         ("cal_stress", 1 if args.kind == "relax" or args.cal_stress else 0),
-        ("out_chg", 0),
         ("out_wfc_lcao", 0),
     ]
+    if "out_chg" not in extra:
+        params.append(("out_chg", 0))
     if args.kind == "relax":
         params += [
             ("relax_method", "cg"),
@@ -912,28 +914,47 @@ def cmd_make_candidates(args) -> None:
     print(f"wrote {args.count} candidate CIFs to {args.out}")
 
 
-def read_input_calculation(job: Path) -> str:
-    input_file = job / "INPUT"
-    if not input_file.is_file():
-        return "scf"
-    for line in input_file.read_text(errors="ignore").splitlines():
+def find_abacus_input(job: Path) -> Path | None:
+    job = job.resolve() if job.exists() else job
+    candidates = []
+    if job.is_file() and job.name == "INPUT":
+        candidates.append(job)
+    elif job.is_dir():
+        candidates.append(job / "INPUT")
+        if job.name.startswith("OUT."):
+            candidates.append(job.parent / "INPUT")
+    for input_file in candidates:
+        if input_file.is_file():
+            return input_file
+    return None
+
+
+def read_input_param(job: Path, key: str) -> str | None:
+    input_file = find_abacus_input(job)
+    if not input_file:
+        return None
+    key = key.lower()
+    for raw in input_file.read_text(errors="ignore").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
         words = line.split()
-        if len(words) >= 2 and words[0] == "calculation":
-            return words[1].lower()
-    return "scf"
+        if len(words) >= 2 and words[0].lower() == key:
+            return words[1]
+    return None
+
+
+def read_input_calculation(job: Path) -> str:
+    return (read_input_param(job, "calculation") or "unknown").lower()
 
 
 def find_abacus_outdir(job: Path) -> Path | None:
+    job = job.resolve() if job.exists() else job
     if job.name.startswith("OUT.") and job.is_dir():
         return job
-    input_file = job / "INPUT"
-    if input_file.is_file():
-        suffix = "ABACUS"
-        for line in input_file.read_text(errors="ignore").splitlines():
-            words = line.split()
-            if len(words) >= 2 and words[0] == "suffix":
-                suffix = words[1]
-                break
+    input_file = find_abacus_input(job)
+    if input_file:
+        suffix = read_input_param(job, "suffix") or "ABACUS"
         candidate = job / f"OUT.{suffix}"
         if candidate.is_dir():
             return candidate
@@ -942,6 +963,7 @@ def find_abacus_outdir(job: Path) -> Path | None:
 
 
 def find_running_log(job: Path) -> Path | None:
+    job = job.resolve() if job.exists() else job
     outdir = find_abacus_outdir(job)
     if outdir:
         logs = sorted(outdir.glob("running_*.log"))
@@ -951,11 +973,49 @@ def find_running_log(job: Path) -> Path | None:
     return direct[0] if direct else None
 
 
+def parse_last_iter_energy(text: str) -> float | None:
+    etot_index = None
+    last_energy = None
+    for line in text.splitlines():
+        words = line.split()
+        if not words:
+            continue
+        if "ETOT/eV" in words:
+            etot_index = words.index("ETOT/eV")
+            continue
+        if etot_index is None or len(words) <= etot_index:
+            continue
+        try:
+            last_energy = float(words[etot_index])
+        except ValueError:
+            continue
+    return last_energy
+
+
+def parse_final_energy(text: str) -> float | None:
+    energy_patterns = [
+        r"!FINAL_ETOT_IS\s+([-+0-9.eE]+)",
+        r"final\s+etot\s+is\s+([-+0-9.eE]+)",
+        r"final\s+energy\s+is\s+([-+0-9.eE]+)",
+        r"TOTAL\s+ENERGY\s*=\s*([-+0-9.eE]+)",
+        r"final_etot\s*[:=]\s*([-+0-9.eE]+)",
+        r"\bETOT\s*[:=]\s*([-+0-9.eE]+)\s*eV",
+    ]
+    for pattern in energy_patterns:
+        matches = re.findall(pattern, text, flags=re.IGNORECASE)
+        if matches:
+            return float(matches[-1])
+    return None
+
+
 def parse_abacus_status(job: Path) -> dict:
+    job = job.resolve() if job.exists() else job
+    outdir = find_abacus_outdir(job)
     log = find_running_log(job)
     row = {
         "job": str(job),
-        "outdir": str(find_abacus_outdir(job) or ""),
+        "calculation": read_input_calculation(job),
+        "outdir": str(outdir or ""),
         "log": str(log or ""),
         "finished": False,
         "converged": False,
@@ -970,6 +1030,8 @@ def parse_abacus_status(job: Path) -> dict:
     lower = text.lower()
     row["finished"] = "finish time" in lower or "total  time" in lower
     negative = [
+        "scf is not converged",
+        "not converged",
         "convergence has not been achieved",
         "convergence has not achieved",
         "convergence has not been reached",
@@ -982,23 +1044,15 @@ def parse_abacus_status(job: Path) -> dict:
     positive = [
         "charge density convergence is achieved",
         "convergence is achieved",
-        "final etot is",
-        "!final_etot_is",
         "relaxation is converged",
+        "geometry optimization is converged",
         "force convergence is achieved",
     ]
     row["converged"] = any(pat in lower for pat in positive) and not row["failed"]
 
-    energy_patterns = [
-        r"!FINAL_ETOT_IS\s+([-+0-9.eE]+)",
-        r"final etot is\s+([-+0-9.eE]+)",
-        r"TOTAL ENERGY\s*=\s*([-+0-9.eE]+)",
-    ]
-    for pattern in energy_patterns:
-        matches = re.findall(pattern, text, flags=re.IGNORECASE)
-        if matches:
-            row["energy_ev"] = float(matches[-1])
-            break
+    row["energy_ev"] = parse_final_energy(text)
+    if row["energy_ev"] is None and row["converged"]:
+        row["energy_ev"] = parse_last_iter_energy(text)
     if row["failed"]:
         row["message"] = "failed or not converged"
     elif row["finished"] and row["converged"]:
@@ -1013,10 +1067,15 @@ def parse_abacus_status(job: Path) -> dict:
 def iter_job_dirs(paths: list[Path]) -> list[Path]:
     jobs: list[Path] = []
     for path in paths:
-        if (path / "INPUT").is_file() or path.name.startswith("OUT."):
+        path = path.expanduser()
+        if find_abacus_input(path) or find_abacus_outdir(path) or find_running_log(path):
             jobs.append(path)
         elif path.is_dir():
-            children = [p for p in path.iterdir() if p.is_dir() and ((p / "INPUT").is_file() or p.name.startswith("OUT."))]
+            children = [
+                p
+                for p in path.iterdir()
+                if p.is_dir() and (find_abacus_input(p) or find_abacus_outdir(p) or find_running_log(p))
+            ]
             jobs.extend(sorted(children, key=lambda p: natural_key(p.name)))
         else:
             die(f"path not found: {path}")
@@ -1037,12 +1096,19 @@ def cmd_check_abacus(args) -> None:
             writer = csv.DictWriter(fp, fieldnames=list(rows[0].keys()))
             writer.writeheader()
             writer.writerows(rows)
-    width = max(len(Path(r["job"]).name) for r in rows)
-    print(f"{'job':<{width}}  finished  converged  failed  energy_ev       message")
+    width = max(len(Path(r["job"]).name or str(r["job"])) for r in rows)
+    out_width = max(6, max(len(Path(r["outdir"]).name) if r["outdir"] else 0 for r in rows))
+    print(
+        f"{'job':<{width}}  {'type':<8}  {'outdir':<{out_width}}  "
+        "finished  converged  failed  energy_ev       message"
+    )
     for row in rows:
         energy = "" if row["energy_ev"] is None else f"{row['energy_ev']:.8f}"
+        job_name = Path(row["job"]).name or str(row["job"])
+        outdir = Path(row["outdir"]).name if row["outdir"] else ""
         print(
-            f"{Path(row['job']).name:<{width}}  {str(row['finished']):<8}  "
+            f"{job_name:<{width}}  {row['calculation']:<8}  {outdir:<{out_width}}  "
+            f"{str(row['finished']):<8}  "
             f"{str(row['converged']):<9}  {str(row['failed']):<6}  {energy:<14}  {row['message']}"
         )
 
@@ -1557,6 +1623,7 @@ def maybe_shift_fermi(x: np.ndarray, fermi: float | None) -> tuple[np.ndarray, s
 
 
 def cmd_plot_dos(args) -> None:
+    os.environ.setdefault("MPLCONFIGDIR", "/tmp/abacuskit-matplotlib")
     import matplotlib
 
     matplotlib.use("Agg")
@@ -1644,6 +1711,11 @@ def cmd_plot_dos(args) -> None:
 
 
 def read_cube_values(path: Path) -> np.ndarray:
+    _, values = read_cube_grid(path)
+    return values
+
+
+def read_cube_grid(path: Path) -> tuple[list[str], np.ndarray]:
     lines = path.read_text(errors="ignore").splitlines()
     if len(lines) < 6:
         die(f"cube file too short: {path}")
@@ -1662,7 +1734,110 @@ def read_cube_values(path: Path) -> np.ndarray:
     need = nx * ny * nz
     if len(values) < need:
         die(f"cube file has {len(values)} values, expected {need}: {path}")
-    return np.array(values[:need], dtype=float).reshape((nx, ny, nz))
+    header = lines[:start]
+    return header, np.array(values[:need], dtype=float).reshape((nx, ny, nz))
+
+
+def write_cube_grid(path: Path, header: list[str], values: np.ndarray) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flat = values.reshape(-1)
+    lines = list(header)
+    for start in range(0, len(flat), 6):
+        chunk = flat[start : start + 6]
+        lines.append(" ".join(f"{value: .10e}" for value in chunk))
+    path.write_text("\n".join(lines) + "\n")
+
+
+def cube_midplane(values: np.ndarray, axis: str, index: int | None) -> tuple[np.ndarray, int]:
+    axis_index = {"x": 0, "y": 1, "z": 2}[axis]
+    size = values.shape[axis_index]
+    if index is None:
+        index = size // 2
+    if not 0 <= index < size:
+        die(f"{axis}-axis slice index {index} is outside 0..{size - 1}")
+    if axis == "x":
+        return values[index, :, :], index
+    if axis == "y":
+        return values[:, index, :], index
+    return values[:, :, index], index
+
+
+def find_grid_file(root: Path, kind: str) -> Path | None:
+    if kind == "elf":
+        return find_first_file(root, ["elf.cube"], ["elf*.cube", "*ELF*.cube", "*elf*.cube"])
+    if kind == "charge":
+        return find_first_file(root, ["SPIN1_CHG.cube", "CHG.cube"], ["*CHG*.cube", "*chg*.cube"])
+    return find_first_file(root, [], ["*.cube"])
+
+
+def plot_grid_slice(values: np.ndarray, out: Path, label: str, axis: str, index: int | None, cmap: str) -> None:
+    os.environ.setdefault("MPLCONFIGDIR", "/tmp/abacuskit-matplotlib")
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    plane, used_index = cube_midplane(values, axis, index)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(6.4, 4.8), dpi=180)
+    im = ax.imshow(plane.T, origin="lower", aspect="auto", cmap=cmap)
+    fig.colorbar(im, ax=ax, label=label)
+    ax.set_xlabel("grid")
+    ax.set_ylabel("grid")
+    ax.set_title(f"{label}, {axis} slice {used_index}")
+    fig.tight_layout()
+    fig.savefig(out)
+    plt.close(fig)
+
+
+def cmd_plot_grid(args) -> None:
+    root = resolve_out_path(args.path)
+    kind = args.kind
+    if kind == "auto":
+        if args.minus:
+            kind = "diff"
+        elif find_grid_file(root, "elf"):
+            kind = "elf"
+        elif find_grid_file(root, "charge"):
+            kind = "charge"
+        else:
+            kind = "cube"
+
+    if kind == "diff":
+        plus_file = args.file or (root if root.is_file() else None) or find_grid_file(root, "charge")
+        if not plus_file:
+            die(f"cannot find charge-density cube under {root}")
+        minus_root = resolve_out_path(args.minus) if args.minus else None
+        minus_file = args.minus_file or (
+            minus_root if minus_root and minus_root.is_file() else find_grid_file(minus_root, "charge") if minus_root else None
+        )
+        if not minus_file:
+            die("charge-density difference needs --minus or --minus-file")
+        header, plus = read_cube_grid(plus_file)
+        _, minus = read_cube_grid(minus_file)
+        if plus.shape != minus.shape:
+            die(f"cube grid shapes differ: {plus_file} {plus.shape} vs {minus_file} {minus.shape}")
+        values = plus - minus
+        label = "Charge density difference"
+        cmap = args.cmap or "RdBu_r"
+        if args.cube_out:
+            write_cube_grid(args.cube_out, header, values)
+            print(f"wrote charge-density difference cube {args.cube_out}")
+    else:
+        if args.file:
+            cube_file = args.file
+        elif root.is_file():
+            cube_file = root
+        else:
+            cube_file = find_grid_file(root, "elf" if kind == "elf" else "charge" if kind == "charge" else "cube")
+        if not cube_file:
+            die(f"cannot find {kind} cube under {root}")
+        _, values = read_cube_grid(cube_file)
+        label = "ELF" if kind == "elf" else "Charge density" if kind == "charge" else cube_file.name
+        cmap = args.cmap or ("viridis" if kind == "elf" else "magma")
+
+    plot_grid_slice(values, args.out, label, args.axis, args.index, cmap)
+    print(f"wrote {label} plot {args.out}")
 
 
 def infer_type_map_from_data(paths: list[Path]) -> list[str]:
@@ -1947,7 +2122,7 @@ def format_menu_value(value) -> str:
     if isinstance(value, tuple):
         return " ".join(str(x) for x in value)
     if isinstance(value, list):
-        return " ".join(value) if value else "none"
+        return " ".join(str(x) for x in value) if value else "none"
     return str(value)
 
 
@@ -2297,6 +2472,8 @@ Current settings:
   327) Apply DFT+U convergence-aid template
   328) Disable DFT+U
   329) Clear DFT+U convergence-aid settings
+  330) Apply ELF cube-output template
+  331) Apply charge-density cube-output template
   0) Back to previous menu
   q) Quit abacuskit
 """
@@ -2351,6 +2528,14 @@ def apply_input_target_template(state: dict, target: str) -> None:
         set_extra_setting(state, "efield_dir", 2)
         set_extra_setting(state, "efield_amp", 0)
         print("Work-function/potential template applied. Default dipole correction direction is Z.")
+    elif target == "elf":
+        state["kind"] = "scf"
+        set_extra_setting(state, "out_elf", "1 3")
+        print("ELF cube-output template applied. ABACUS will write elf.cube under OUT.<suffix>.")
+    elif target == "charge":
+        state["kind"] = "scf"
+        set_extra_setting(state, "out_chg", "1 3")
+        print("Charge-density cube-output template applied. ABACUS will write charge-density cube files.")
     else:
         die(f"unknown INPUT target template: {target}")
 
@@ -2464,6 +2649,10 @@ def interactive_input_template() -> None:
                 clear_dftu_settings(state)
             elif choice == "329":
                 clear_dftu_mixing_aid(state)
+            elif choice == "330":
+                apply_input_target_template(state, "elf")
+            elif choice == "331":
+                apply_input_target_template(state, "charge")
             else:
                 print("Unknown 30x option.")
         except SystemExit as exc:
@@ -2471,18 +2660,11 @@ def interactive_input_template() -> None:
 
 
 def interactive_check_abacus() -> None:
-    print("\n[5] Check ABACUS jobs\n")
-    jobs = [Path(x).expanduser() for x in prompt_multi("Job directory paths")]
-    if not jobs:
-        jobs = [prompt_path("Job directory path", "02_abacus_sp")]
-    write_json = prompt_yes_no("Write JSON report?", False)
-    write_csv = prompt_yes_no("Write CSV report?", False)
-    args = argparse.Namespace(
-        jobs=jobs,
-        json=prompt_path("JSON report path", "check_report.json") if write_json else None,
-        csv=prompt_path("CSV report path", "check_report.csv") if write_csv else None,
-    )
+    print("\n[5] Check ABACUS job status in current directory\n")
+    args = argparse.Namespace(jobs=[Path(".")], json=None, csv=None)
     cmd_check_abacus(args)
+    print("ABACUS job check finished. Exiting abacuskit.")
+    raise ProgramExit
 
 
 def interactive_launch_script() -> None:
@@ -2573,6 +2755,36 @@ def interactive_plot_dos() -> None:
     cmd_plot_dos(args)
 
 
+def interactive_plot_grid() -> None:
+    print("\n[14] Plot ELF / charge density / charge-density difference\n")
+    kind = prompt_choice("Plot kind", ["auto", "elf", "charge", "diff", "cube"], "auto")
+    args = argparse.Namespace(
+        path=prompt_path("ABACUS job, OUT.* directory, or cube file"),
+        kind=kind,
+        file=None,
+        minus=None,
+        minus_file=None,
+        cube_out=None,
+        axis=prompt_choice("Slice axis", ["z", "x", "y"], "z"),
+        index=None,
+        cmap=None,
+        out=None,
+    )
+    index_text = prompt_text("Slice index, empty for middle", "")
+    args.index = int(index_text) if index_text else None
+    file_text = prompt_text("Explicit cube file, empty for auto", "")
+    args.file = Path(file_text).expanduser() if file_text else None
+    if kind == "diff":
+        args.minus = prompt_path("Subtracted ABACUS job, OUT.* directory, or cube file")
+        minus_file_text = prompt_text("Explicit subtracted cube file, empty for auto", "")
+        args.minus_file = Path(minus_file_text).expanduser() if minus_file_text else None
+        cube_out_text = prompt_text("Output difference cube", "charge_diff.cube")
+        args.cube_out = Path(cube_out_text).expanduser() if cube_out_text else None
+    default_out = "charge_diff.png" if kind == "diff" else f"{kind if kind != 'auto' else 'grid'}.png"
+    args.out = prompt_path("Output image", default_out)
+    cmd_plot_grid(args)
+
+
 def interactive_collect_deepmd() -> None:
     print("\n[7] Collect ABACUS outputs to DeepMD data\n")
     jobs = [Path(x).expanduser() for x in prompt_multi("ABACUS job directory paths")]
@@ -2633,6 +2845,7 @@ Affiliation: {__affiliation__}
   11) Prepare convergence-test jobs
   12) Collect ABACUS metrics / report
   13) Create ABACUS launch scripts
+  14) Plot ELF / charge density / charge-density difference
   h) Show command-line help
   q) Quit abacuskit
   0) Exit
@@ -2655,6 +2868,7 @@ def interactive_menu() -> None:
         "11": interactive_conv_test,
         "12": interactive_collect_report,
         "13": interactive_launch_script,
+        "14": interactive_plot_grid,
     }
     while True:
         print_interactive_menu()
@@ -2843,6 +3057,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fermi", type=float, help="shift energy by this Fermi energy in eV")
     p.add_argument("--out", type=Path, required=True)
     p.set_defaults(func=cmd_plot_dos)
+
+    p = sub.add_parser("plot-grid", help="plot ELF/charge-density cube files or charge-density differences")
+    p.add_argument("path", type=Path, help="ABACUS job directory, OUT.* directory, or cube file")
+    p.add_argument("--kind", choices=["auto", "elf", "charge", "diff", "cube"], default="auto")
+    p.add_argument("--file", type=Path, help="explicit cube file for ELF/charge or positive diff term")
+    p.add_argument("--minus", type=Path, help="ABACUS job directory, OUT.* directory, or cube file to subtract")
+    p.add_argument("--minus-file", type=Path, help="explicit cube file to subtract")
+    p.add_argument("--cube-out", type=Path, help="write charge-density difference cube")
+    p.add_argument("--axis", choices=["x", "y", "z"], default="z")
+    p.add_argument("--index", type=int, help="slice index; default is the middle slice")
+    p.add_argument("--cmap", help="matplotlib colormap name")
+    p.add_argument("--out", type=Path, required=True)
+    p.set_defaults(func=cmd_plot_grid)
 
     p = sub.add_parser("collect-deepmd", help="convert ABACUS outputs to DeepMD npy via dpdata")
     p.add_argument("jobs", type=Path, nargs="+")

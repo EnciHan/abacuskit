@@ -4,9 +4,16 @@
 
 `abacuskit` 是一个集成式 ABACUS + DeepMD 命令行程序，用于生成 ABACUS 输入文件、准备批量任务、检查/汇总计算结果，并把 ABACUS 输出转换为 DeepMD 数据。
 
-- Version: v1.0.0
+- Version: v1.1.0
 - Author: Han Enci, Zhong Lisheng, Yu Yutong, Xu Mengting, Chen Jingyuan
 - Affiliation: Xi'an University of Technology
+
+## v1.1 更新记录
+
+- 简化交互菜单 5 号功能：输入 `5` 后直接检查当前目录下的 ABACUS 任务状态并自动退出。
+- 增强 ABACUS 输出识别：可自动识别当前目录、`OUT.<suffix>` 输出目录，或当前目录下的多个任务子目录。
+- 检查结果新增任务类型和输出目录显示，并报告是否结束、是否收敛、是否失败和收敛后的最终能量。
+- 增加 ELF、电荷密度和电荷密度差 cube 文件绘图功能，并补充对应 INPUT 模板选项。
 
 ## 安装
 
@@ -53,6 +60,7 @@ abacuskit
 11   Prepare convergence-test jobs
 12   Collect ABACUS metrics / report
 13   Create ABACUS launch scripts
+14   Plot ELF / charge density / charge-density difference
 ```
 
 常用的 CIF 转 STRU 菜单流程：
@@ -86,6 +94,14 @@ q    Quit abacuskit
 ```
 
 例如：先输入 `1`，再输入 `102` 切到 precision 基组，程序会自动回到 `10x` 菜单；再输入 `103`，按提示输入 `Ni 2`，再回到 `10x` 菜单；最后输入 `101` 生成 `STRU`。
+
+常用的 ABACUS 输出检查菜单流程：
+
+```text
+5    Check ABACUS job status
+```
+
+输入 `5` 后会直接检查当前目录 `.`。如果当前目录本身是 ABACUS 任务目录、`OUT.<suffix>` 输出目录，或当前目录下包含多个 ABACUS 任务目录，程序会自动识别。检查完成后会输出自动识别到的任务类型、输出目录、是否结束、是否收敛、是否失败，以及收敛后的最终能量，随后自动退出程序。
 
 常用的 INPUT 生成菜单流程：
 
@@ -128,6 +144,8 @@ q    Quit abacuskit
 327  Apply DFT+U convergence-aid template
 328  Disable DFT+U
 329  Clear DFT+U convergence-aid settings
+330  Apply ELF cube-output template
+331  Apply charge-density cube-output template
 0    Back to previous menu
 q    Quit abacuskit
 ```
@@ -140,6 +158,8 @@ q    Quit abacuskit
 - `323` 会切到 `nscf` 并设置 `out_band=1`、`out_proj_band=1`；需要自己准备 line-mode `KPT`。
 - `324` 会打开 `out_mat_hs2/out_mat_hs`，作为 COHP 后处理所需 H/S 矩阵输出模板。
 - `325` 会打开 `out_pot=2` 和 Z 方向偶极修正，作为 slab 功函数/静电势模板。
+- `330` 会写入 `out_elf="1 3"`，让 ABACUS 在 `OUT.<suffix>` 输出 ELF cube。
+- `331` 会写入 `out_chg="1 3"`，让 ABACUS 在 `OUT.<suffix>` 输出电荷密度 cube。
 - 设置 `nspin=2` 后，生成的 `INPUT` 会显式写出 `mixing_beta_mag`、`mixing_gg0`、`mixing_gg0_mag`、`mixing_gg0_min`、`mixing_restart`、`mixing_dmr`，方便后续手动调磁性态收敛。
 - `326` 会写入 DFT+U 参数：`dft_plus_u`、`orbital_corr`、`hubbard_u`、`yukawa_potential`、`omc`，mode 1 还会写入 `onsite_radius`。`orbital_corr` 和 `hubbard_u` 的列表顺序要与 `STRU` 里的原子类型顺序一致。
 - `327` 会写入 DFT+U 常用收敛辅助参数：`mixing_restart`、`mixing_dmr`、`uramping`。
@@ -413,7 +433,35 @@ abacuskit plot-dos OUT.ABACUS \
 
 LDOS 支持 ABACUS 的 `LDOS.txt` 线扫描文件；如果输出的是 `LDOS_*eV.cube`，脚本会自动画 cube 中间切片。
 
-## 11. ABACUS 输出转 DeepMD 数据
+## 11. 绘制 ELF / 电荷密度 / 电荷密度差
+
+先用 `3 -> 330` 或 `3 -> 331` 生成包含 `out_elf 1 3` / `out_chg 1 3` 的 `INPUT`，运行 ABACUS 后会在 `OUT.<suffix>` 下得到 cube 文件。
+
+绘制 ELF 或电荷密度 cube 的中间切片：
+
+```bash
+abacuskit plot-grid OUT.ABACUS \
+  --kind elf \
+  --out elf.png
+
+abacuskit plot-grid OUT.ABACUS \
+  --kind charge \
+  --out charge.png
+```
+
+计算两个电荷密度 cube 的差值并绘图，同时保存差分 cube：
+
+```bash
+abacuskit plot-grid adsorbed/OUT.ABACUS \
+  --kind diff \
+  --minus clean/OUT.ABACUS \
+  --cube-out charge_diff.cube \
+  --out charge_diff.png
+```
+
+默认画 `z` 方向中间切片；可用 `--axis x|y|z` 和 `--index N` 指定切片。
+
+## 12. ABACUS 输出转 DeepMD 数据
 
 ```bash
 abacuskit collect-deepmd 02_abacus_sp \
