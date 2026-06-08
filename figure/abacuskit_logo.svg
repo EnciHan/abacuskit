@@ -27,21 +27,22 @@
     <circle cx="56" cy="0" r="8" fill="#27c93f"/>
   </g>
 
-  <text x="90" y="155"
+  <text x="105" y="145"
         fill="#eaf6ff"
-        font-family="'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace"
-        font-size="31"
+        font-family="'DejaVu Sans Mono', 'Liberation Mono', Consolas, Menlo, monospace"
+        font-size="24"
         font-weight="700"
-        letter-spacing="0">
-    <tspan x="90" dy="0">  ___   ____    ___    ____  _   _  ____  _  __  ___  _____ </tspan>
-    <tspan x="90" dy="42"> / _ \ | __ )  / _ \  / ___|| | | |/ ___|| |/ / |_ _||_   _|</tspan>
-    <tspan x="90" dy="42">| /_\ ||  _ \ | /_\ || |    | | | |\___ \| ' /   | |   | |  </tspan>
-    <tspan x="90" dy="42">|  _  || |_) ||  _  || |___ | |_| | ___) | . \   | |   | |  </tspan>
-    <tspan x="90" dy="42">|_| |_||____/ |_| |_| \____| \___/ |____/|_|\_\ |___|  |_|  </tspan>
+        letter-spacing="0"
+        xml:space="preserve">
+    <tspan x="105" dy="0" textLength="930" lengthAdjust="spacingAndGlyphs">  ___   ____    ___    ____  _   _  ____  _  __  ___  _____ </tspan>
+    <tspan x="105" dy="34" textLength="930" lengthAdjust="spacingAndGlyphs"> / _ \ | __ )  / _ \  / ___|| | | |/ ___|| |/ / |_ _||_   _|</tspan>
+    <tspan x="105" dy="34" textLength="930" lengthAdjust="spacingAndGlyphs">| /_\ ||  _ \ | /_\ || |    | | | |\___ \| ' /   | |   | |  </tspan>
+    <tspan x="105" dy="34" textLength="930" lengthAdjust="spacingAndGlyphs">|  _  || |_) ||  _  || |___ | |_| | ___) | . \   | |   | |  </tspan>
+    <tspan x="105" dy="34" textLength="930" lengthAdjust="spacingAndGlyphs">|_| |_||____/ |_| |_| \____| \___/ |____/|_|\_\ |___|  |_|  </tspan>
   </text>
 
-  <rect x="90" y="382" width="1020" height="3" rx="1.5" fill="url(#accent)"/>
-  <text x="90" y="425"
+  <rect x="90" y="350" width="1020" height="3" rx="1.5" fill="url(#accent)"/>
+  <text x="90" y="397"
         fill="#f7fbff"
         font-family="Inter, Arial, sans-serif"
         font-size="28"
@@ -49,7 +50,7 @@
         letter-spacing="0">
     Author: Han Enci
   </text>
-  <text x="90" y="461"
+  <text x="90" y="433"
         fill="#bcd2e6"
         font-family="Inter, Arial, sans-serif"
         font-size="24"
