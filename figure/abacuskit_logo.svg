@@ -21,12 +21,6 @@
   <rect x="28" y="28" width="1144" height="464" rx="24" fill="none" stroke="#ffffff" stroke-opacity="0.12" stroke-width="2"/>
   <rect x="58" y="58" width="1084" height="404" rx="18" fill="#07111f" fill-opacity="0.58" filter="url(#softShadow)"/>
 
-  <g transform="translate(91 88)">
-    <circle cx="0" cy="0" r="8" fill="#ff5f56"/>
-    <circle cx="28" cy="0" r="8" fill="#ffbd2e"/>
-    <circle cx="56" cy="0" r="8" fill="#27c93f"/>
-  </g>
-
   <text x="105" y="145"
         fill="#eaf6ff"
         font-family="'DejaVu Sans Mono', 'Liberation Mono', Consolas, Menlo, monospace"
