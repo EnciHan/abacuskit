@@ -831,8 +831,6 @@ def make_input(
         ("nspin", nspin),
         ("scf_thr", "1e-6"),
         ("scf_nmax", 300),
-        ("smearing_method", "gauss"),
-        ("smearing_sigma", 0.015),
         ("mixing_type", "broyden"),
         ("mixing_beta", 0.10),
         ("mixing_ndim", 20),
@@ -843,6 +841,10 @@ def make_input(
         params.append(("out_wfc_lcao", 0))
     if "out_chg" not in extra:
         params.append(("out_chg", 0))
+    if "smearing_method" not in extra:
+        params.append(("smearing_method", "gauss"))
+    if "smearing_sigma" not in extra:
+        params.append(("smearing_sigma", 0.015))
     if calculation == "md":
         params += [
             ("md_nstep", extra.pop("md_nstep", "1000")),
@@ -881,14 +883,15 @@ def input_template_params(args) -> list[tuple[str, object]]:
         ("device", args.device),
         ("symmetry", 0),
         ("gamma_only", 0),
-        ("kspacing", args.kspacing),
+    ]
+    if not getattr(args, "no_kspacing", False):
+        params.append(("kspacing", args.kspacing))
+    params += [
         ("dft_functional", "PBE"),
         ("ecutwfc", args.ecutwfc),
         ("nspin", args.nspin),
         ("scf_thr", "1e-6"),
         ("scf_nmax", 300),
-        ("smearing_method", "gauss"),
-        ("smearing_sigma", 0.015),
         ("mixing_type", "broyden"),
         ("mixing_beta", 0.10),
         ("mixing_ndim", 20),
@@ -899,6 +902,10 @@ def input_template_params(args) -> list[tuple[str, object]]:
         params.append(("out_wfc_lcao", 0))
     if "out_chg" not in extra:
         params.append(("out_chg", 0))
+    if "smearing_method" not in extra:
+        params.append(("smearing_method", "gauss"))
+    if "smearing_sigma" not in extra:
+        params.append(("smearing_sigma", 0.015))
     if args.kind == "relax":
         params += [
             ("relax_method", "cg"),
@@ -2221,7 +2228,7 @@ def find_band_file(root: Path, explicit: Path | None = None) -> Path | None:
     if root.is_file():
         return root
     outdir = resolve_out_path(root)
-    return find_first_file(outdir, ["BANDS_1.dat", "BANDS_1"], ["BANDS*.dat", "BANDS*"])
+    return find_first_file(outdir, ["BANDS_1.dat", "BANDS_1", "band.txt"], ["BANDS*.dat", "BANDS*", "band*.txt"])
 
 
 def kpoint_label(coords: tuple[float, float, float]) -> str:
@@ -2257,17 +2264,22 @@ def find_kpt_file(root: Path) -> Path | None:
 def parse_line_kpt_ticks(kpt: Path | None, x: np.ndarray) -> tuple[list[float], list[str]]:
     if not kpt or not kpt.is_file():
         return [float(x[0]), float(x[-1])], ["", ""]
-    lines = [line.split("#", 1)[0].strip() for line in kpt.read_text(errors="ignore").splitlines()]
-    lines = [line for line in lines if line]
-    if len(lines) < 4 or lines[2].lower() != "line":
+    raw_lines = [line.strip() for line in kpt.read_text(errors="ignore").splitlines()]
+    entries = []
+    for raw in raw_lines:
+        body, _, comment = raw.partition("#")
+        body = body.strip()
+        if body:
+            entries.append((body, comment.strip()))
+    if len(entries) < 4 or entries[2][0].lower() != "line":
         return [float(x[0]), float(x[-1])], ["", ""]
     try:
-        npoint = int(float(lines[1].split()[0]))
+        npoint = int(float(entries[1][0].split()[0]))
     except ValueError:
         return [float(x[0]), float(x[-1])], ["", ""]
     points = []
-    for line in lines[3 : 3 + npoint]:
-        parts = line.split()
+    for body, comment in entries[3 : 3 + npoint]:
+        parts = body.split()
         if len(parts) < 4:
             continue
         try:
@@ -2275,16 +2287,31 @@ def parse_line_kpt_ticks(kpt: Path | None, x: np.ndarray) -> tuple[list[float], 
             count = int(float(parts[3]))
         except ValueError:
             continue
-        points.append((coords, count))
+        label = comment.split()[0] if comment else kpoint_label(coords)
+        label = r"$\Gamma$" if label.upper() in {"GAMMA", "G", "Γ"} else label
+        points.append((coords, count, label))
     if len(points) < 2:
         return [float(x[0]), float(x[-1])], ["", ""]
     indices = [0]
     total = 0
-    for _, count in points[:-1]:
+    for _, count, _ in points[:-1]:
         total += max(count, 1)
         indices.append(min(total, len(x) - 1))
     ticks = [float(x[i]) for i in indices]
-    labels = [kpoint_label(coords) for coords, _ in points[: len(ticks)]]
+    labels = [label for _, _, label in points[: len(ticks)]]
+    if len(ticks) > 2:
+        merged_ticks: list[float] = []
+        merged_labels: list[str] = []
+        min_sep = max(float(x[-1] - x[0]) * 0.025, 1.0e-8)
+        for tick, label in zip(ticks, labels):
+            if merged_ticks and abs(tick - merged_ticks[-1]) < min_sep:
+                merged_ticks[-1] = 0.5 * (merged_ticks[-1] + tick)
+                if label and label not in merged_labels[-1].split("|"):
+                    merged_labels[-1] = f"{merged_labels[-1]}|{label}" if merged_labels[-1] else label
+            else:
+                merged_ticks.append(tick)
+                merged_labels.append(label)
+        ticks, labels = merged_ticks, merged_labels
     return ticks, labels
 
 
@@ -2350,7 +2377,7 @@ def cmd_plot_band(args) -> None:
     root = args.path.expanduser()
     band_file = find_band_file(root, args.file)
     if not band_file or not band_file.is_file():
-        die(f"cannot find BANDS_*.dat under {root}")
+        die(f"cannot find BANDS_*.dat or band.txt under {root}")
     data = read_numeric_table(band_file)
     if data.shape[1] < 3:
         die(f"band file needs at least 3 columns: {band_file}")
@@ -3184,6 +3211,7 @@ def default_input_state() -> dict:
         "device": "gpu",
         "ks_solver": "cusolver",
         "kspacing": 0.14,
+        "no_kspacing": False,
         "ecutwfc": 100,
         "nspin": 1,
         "cal_stress": False,
@@ -3200,16 +3228,17 @@ def print_input_menu(state: dict) -> None:
     vdw = get_extra_setting(state, "vdw_method") or "off"
     dipole = get_extra_setting(state, "dip_cor_flag") or "off"
     dftu = format_dftu_status(state)
+    kspacing = "off (use KPT file)" if state.get("no_kspacing") else state["kspacing"]
     print(
         f"""
----------- 30x: Generate ABACUS INPUT ----------
+---------- 20x: Generate ABACUS INPUT ----------
 Current settings:
   Output          : {state["out"]}
   Calculation     : {state["kind"]}
   Suffix          : {state["suffix"]}
   Orbital basis   : {state["orbital_quality"]} LCAO
   Device / solver : {state["device"]} / {state["ks_solver"]}
-  kspacing        : {state["kspacing"]}
+  kspacing        : {kspacing}
   ecutwfc         : {state["ecutwfc"]}
   nspin           : {state["nspin"]}
   cal_stress      : {state["cal_stress"]}
@@ -3219,37 +3248,37 @@ Current settings:
   DFT+U           : {dftu}
   Extra INPUT     : {format_menu_value(state["set"])}
 
-  301) Generate INPUT now using current settings
-  302) Set calculation to scf
-  303) Set calculation to relax
-  304) Set orbital basis to precision
-  305) Set orbital basis to efficiency
-  306) Set nspin
-  307) Set ecutwfc
-  308) Set kspacing
-  309) Set device, gpu or cpu
-  310) Set ks_solver
-  311) Toggle cal_stress
-  312) Toggle DOS/PDOS output
-  313) Add extra INPUT key=value
-  314) Change output INPUT path
-  315) Change suffix
-  316) Set relax parameters
-  317) Clear extra INPUT settings
-  318) Reset to defaults
-  319) Set VDW correction, e.g. d3_bj
-  320) Toggle dipole correction, default Z axis
-  321) Apply DOS target template
-  322) Apply PDOS target template
-  323) Apply band structure target template
-  324) Apply COHP output template
-  325) Apply work-function/potential template
-  326) Enable/edit DFT+U
-  327) Apply DFT+U convergence-aid template
-  328) Disable DFT+U
-  329) Clear DFT+U convergence-aid settings
-  330) Apply ELF cube-output template
-  331) Apply charge-density cube-output template
+  201) Generate INPUT now using current settings
+  202) Set calculation to scf
+  203) Set calculation to relax
+  204) Set orbital basis to precision
+  205) Set orbital basis to efficiency
+  206) Set nspin
+  207) Set ecutwfc
+  208) Set/enable kspacing
+  209) Set device, gpu or cpu
+  210) Set ks_solver
+  211) Toggle cal_stress
+  212) Toggle DOS/PDOS output
+  213) Add extra INPUT key=value
+  214) Change output INPUT path
+  215) Change suffix
+  216) Set relax parameters
+  217) Clear extra INPUT settings
+  218) Reset to defaults
+  219) Set VDW correction, e.g. d3_bj
+  220) Toggle dipole correction, default Z axis
+  221) Apply DOS target template
+  222) Apply PDOS target template
+  223) Apply band structure target template
+  224) Apply COHP output template
+  225) Apply work-function/potential template
+  226) Enable/edit DFT+U
+  227) Apply DFT+U convergence-aid template
+  228) Disable DFT+U
+  229) Clear DFT+U convergence-aid settings
+  230) Apply ELF cube-output template
+  231) Apply charge-density cube-output template
   0) Back to previous menu
   q) Quit abacuskit
 """
@@ -3265,40 +3294,45 @@ def apply_input_target_template(state: dict, target: str) -> None:
     if target == "dos":
         state["kind"] = "nscf"
         state["dos"] = True
+        state["no_kspacing"] = True
         set_extra_setting(state, "init_chg", "file")
         set_extra_setting(state, "read_file_dir", "./")
         set_extra_setting(state, "out_dos", 1)
         set_extra_setting(state, "dos_sigma", 0.07)
         set_extra_setting(state, "dos_edelta_ev", 0.01)
-        print("DOS target template applied. Prepare a dense KPT mesh and previous charge density.")
+        print("DOS target template applied. kspacing is disabled; prepare a dense KPT mesh and previous charge density.")
     elif target == "pdos":
         state["kind"] = "nscf"
         state["dos"] = True
+        state["no_kspacing"] = True
         set_extra_setting(state, "init_chg", "file")
         set_extra_setting(state, "read_file_dir", "./")
         set_extra_setting(state, "out_dos", 2)
         set_extra_setting(state, "dos_sigma", 0.07)
         set_extra_setting(state, "dos_edelta_ev", 0.01)
-        print("PDOS target template applied. LCAO basis will output the PDOS file.")
+        print("PDOS target template applied. kspacing is disabled; prepare a dense KPT mesh.")
     elif target == "band":
         state["kind"] = "nscf"
         state["dos"] = False
+        state["no_kspacing"] = True
         set_extra_setting(state, "init_chg", "file")
         set_extra_setting(state, "read_file_dir", "./")
         set_extra_setting(state, "out_band", 1)
         set_extra_setting(state, "out_proj_band", 1)
         set_extra_setting(state, "smearing_method", "gaussian")
         set_extra_setting(state, "smearing_sigma", 0.02)
-        print("Band target template applied. Prepare a line-mode KPT file before running ABACUS.")
+        print("Band target template applied. kspacing is disabled so ABACUS will use the line-mode KPT file.")
     elif target == "cohp":
         state["kind"] = "scf"
         state["basis_type"] = "lcao"
+        state["no_kspacing"] = False
         set_extra_setting(state, "out_mat_hs", "1 8")
         set_extra_setting(state, "out_wfc_lcao", 1)
         set_extra_setting(state, "out_app_flag", 1)
         print("COHP output template applied. Run this LCAO SCF first, then use 132 for COHP post-processing.")
     elif target == "workfunc":
         state["kind"] = "scf"
+        state["no_kspacing"] = False
         set_extra_setting(state, "out_pot", 2)
         set_extra_setting(state, "efield_flag", "true")
         set_extra_setting(state, "dip_cor_flag", "true")
@@ -3307,10 +3341,12 @@ def apply_input_target_template(state: dict, target: str) -> None:
         print("Work-function/potential template applied. Default dipole correction direction is Z.")
     elif target == "elf":
         state["kind"] = "scf"
+        state["no_kspacing"] = False
         set_extra_setting(state, "out_elf", "1 3")
         print("ELF cube-output template applied. ABACUS will write elf.cube under OUT.<suffix>.")
     elif target == "charge":
         state["kind"] = "scf"
+        state["no_kspacing"] = False
         set_extra_setting(state, "out_chg", "1 3")
         print("Charge-density cube-output template applied. ABACUS will write charge-density cube files.")
     else:
@@ -3321,66 +3357,69 @@ def interactive_input_template() -> None:
     state = default_input_state()
     while True:
         print_input_menu(state)
-        choice = prompt_text("Enter 30x option", "301").lower()
+        choice = prompt_text("Enter 20x option", "201").lower()
         try:
             if choice in {"q", "quit", "exit"}:
                 raise ProgramExit
-            if choice in {"0", "300"}:
+            if choice in {"0", "200"}:
                 return
-            if choice == "301":
+            if choice == "201":
                 run_input_from_state(state)
                 print("INPUT generation finished. Exiting abacuskit.")
                 raise ProgramExit
-            if choice == "302":
+            if choice == "202":
                 state["kind"] = "scf"
+                state["no_kspacing"] = False
                 print("Calculation set to scf.")
-            elif choice == "303":
+            elif choice == "203":
                 state["kind"] = "relax"
+                state["no_kspacing"] = False
                 print("Calculation set to relax.")
-            elif choice == "304":
+            elif choice == "204":
                 state["orbital_quality"] = "precision"
                 print("Orbital basis set to precision.")
-            elif choice == "305":
+            elif choice == "205":
                 state["orbital_quality"] = "efficiency"
                 print("Orbital basis set to efficiency.")
-            elif choice == "306":
+            elif choice == "206":
                 state["nspin"] = prompt_int("nspin", state["nspin"])
-            elif choice == "307":
+            elif choice == "207":
                 state["ecutwfc"] = prompt_float("ecutwfc", state["ecutwfc"])
-            elif choice == "308":
+            elif choice == "208":
                 state["kspacing"] = prompt_float("kspacing", state["kspacing"])
-            elif choice == "309":
+                state["no_kspacing"] = False
+            elif choice == "209":
                 state["device"] = prompt_choice("Device", ["gpu", "cpu"], state["device"])
-            elif choice == "310":
+            elif choice == "210":
                 state["ks_solver"] = prompt_text("KS solver", state["ks_solver"])
-            elif choice == "311":
+            elif choice == "211":
                 state["cal_stress"] = not state["cal_stress"]
                 print(f"cal_stress set to {state['cal_stress']}.")
-            elif choice == "312":
+            elif choice == "212":
                 state["dos"] = not state["dos"]
                 print(f"DOS/PDOS output set to {state['dos']}.")
-            elif choice == "313":
+            elif choice == "213":
                 item = prompt_text("Extra INPUT key=value, e.g. mixing_beta=0.05")
                 if "=" not in item:
                     die("expected key=value, for example: mixing_beta=0.05")
                 append_option(state, "set", item)
-            elif choice == "314":
+            elif choice == "214":
                 state["out"] = prompt_path("Output INPUT file", "INPUT")
-            elif choice == "315":
+            elif choice == "215":
                 state["suffix"] = prompt_text("ABACUS output suffix", state["suffix"])
-            elif choice == "316":
+            elif choice == "216":
                 state["kind"] = "relax"
                 state["relax_nmax"] = prompt_int("relax_nmax", state["relax_nmax"])
                 state["force_thr_ev"] = prompt_float("force_thr_ev", state["force_thr_ev"])
                 state["stress_thr"] = prompt_float("stress_thr", state["stress_thr"])
-            elif choice == "317":
+            elif choice == "217":
                 state["set"] = None
                 print("Extra INPUT settings cleared.")
-            elif choice == "318":
+            elif choice == "218":
                 state.clear()
                 state.update(default_input_state())
                 print("INPUT settings reset to defaults.")
-            elif choice == "319":
+            elif choice == "219":
                 method = prompt_choice("VDW method", ["d3_bj", "d3_0", "d2", "none"], "d3_bj")
                 if method == "none":
                     remove_extra_setting(state, "vdw_method")
@@ -3388,7 +3427,7 @@ def interactive_input_template() -> None:
                 else:
                     set_extra_setting(state, "vdw_method", method)
                     print(f"VDW correction set to {method}.")
-            elif choice == "320":
+            elif choice == "220":
                 if get_extra_setting(state, "dip_cor_flag"):
                     remove_extra_setting(
                         state,
@@ -3408,30 +3447,30 @@ def interactive_input_template() -> None:
                     set_extra_setting(state, "efield_dir", axis_to_dir[axis])
                     set_extra_setting(state, "efield_amp", 0)
                     print(f"Dipole correction enabled along {axis.upper()} with efield_amp=0.")
-            elif choice == "321":
+            elif choice == "221":
                 apply_input_target_template(state, "dos")
-            elif choice == "322":
+            elif choice == "222":
                 apply_input_target_template(state, "pdos")
-            elif choice == "323":
+            elif choice == "223":
                 apply_input_target_template(state, "band")
-            elif choice == "324":
+            elif choice == "224":
                 apply_input_target_template(state, "cohp")
-            elif choice == "325":
+            elif choice == "225":
                 apply_input_target_template(state, "workfunc")
-            elif choice == "326":
+            elif choice == "226":
                 apply_dftu_settings(state)
-            elif choice == "327":
+            elif choice == "227":
                 apply_dftu_mixing_aid(state)
-            elif choice == "328":
+            elif choice == "228":
                 clear_dftu_settings(state)
-            elif choice == "329":
+            elif choice == "229":
                 clear_dftu_mixing_aid(state)
-            elif choice == "330":
+            elif choice == "230":
                 apply_input_target_template(state, "elf")
-            elif choice == "331":
+            elif choice == "231":
                 apply_input_target_template(state, "charge")
             else:
-                print("Unknown 30x option.")
+                print("Unknown 20x option.")
         except SystemExit as exc:
             print(exc)
 
@@ -4120,8 +4159,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_structure_args(p)
     p.set_defaults(func=cmd_prepare_abacus)
 
-    p = sub.add_parser("input-template", help="write an ABACUS INPUT template for scf or relax")
-    p.add_argument("--kind", choices=["scf", "relax"], required=True)
+    p = sub.add_parser("input-template", help="write an ABACUS INPUT template")
+    p.add_argument("--kind", choices=["scf", "relax", "nscf"], required=True)
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--suffix", default="ABACUS")
     p.add_argument("--pseudo-dir", type=Path, default=DEFAULT_PSEUDO_DIR)
@@ -4131,6 +4170,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--device", choices=["cpu", "gpu"], default="gpu")
     p.add_argument("--ks-solver", default="cusolver")
     p.add_argument("--kspacing", type=float, default=0.14)
+    p.add_argument("--no-kspacing", action="store_true", help="do not write kspacing, so ABACUS uses the KPT file")
     p.add_argument("--ecutwfc", type=float, default=100)
     p.add_argument("--nspin", type=int, default=1)
     p.add_argument("--cal-stress", action="store_true")

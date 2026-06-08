@@ -144,62 +144,62 @@ q    Quit abacuskit
 
 ```text
 2    Generate ABACUS INPUT
-301  Generate INPUT now using current settings
+201  Generate INPUT now using current settings
 ```
 
-输入 `2` 后进入 `30x` 二级菜单。默认设置是 scf、efficiency LCAO 基组、gpu、cusolver、`kspacing=0.14`、`ecutwfc=100`、`nspin=1`、输出 `INPUT`。输入 `301` 会按当前设置生成 `INPUT`，成功后自动退出程序。
+输入 `2` 后进入 `20x` 二级菜单。默认设置是 scf、efficiency LCAO 基组、gpu、cusolver、`kspacing=0.14`、`ecutwfc=100`、`nspin=1`、输出 `INPUT`。输入 `201` 会按当前设置生成 `INPUT`，成功后自动退出程序。
 
-常用 `30x` 编号：
+常用 `20x` 编号：
 
 ```text
-301  Generate INPUT now using current settings
-302  Set calculation to scf
-303  Set calculation to relax
-304  Set orbital basis to precision
-305  Set orbital basis to efficiency
-306  Set nspin
-307  Set ecutwfc
-308  Set kspacing
-309  Set device, gpu or cpu
-310  Set ks_solver
-311  Toggle cal_stress
-312  Toggle DOS/PDOS output
-313  Add extra INPUT key=value
-314  Change output INPUT path
-315  Change suffix
-316  Set relax parameters
-317  Clear extra INPUT settings
-318  Reset to defaults
-319  Set VDW correction, e.g. d3_bj / d3_0 / d2
-320  Toggle dipole correction, default Z axis
-321  Apply DOS target template
-322  Apply PDOS target template
-323  Apply band structure target template
-324  Apply COHP output template
-325  Apply work-function/potential template
-326  Enable/edit DFT+U
-327  Apply DFT+U convergence-aid template
-328  Disable DFT+U
-329  Clear DFT+U convergence-aid settings
-330  Apply ELF cube-output template
-331  Apply charge-density cube-output template
+201  Generate INPUT now using current settings
+202  Set calculation to scf
+203  Set calculation to relax
+204  Set orbital basis to precision
+205  Set orbital basis to efficiency
+206  Set nspin
+207  Set ecutwfc
+208  Set/enable kspacing
+209  Set device, gpu or cpu
+210  Set ks_solver
+211  Toggle cal_stress
+212  Toggle DOS/PDOS output
+213  Add extra INPUT key=value
+214  Change output INPUT path
+215  Change suffix
+216  Set relax parameters
+217  Clear extra INPUT settings
+218  Reset to defaults
+219  Set VDW correction, e.g. d3_bj / d3_0 / d2
+220  Toggle dipole correction, default Z axis
+221  Apply DOS target template
+222  Apply PDOS target template
+223  Apply band structure target template
+224  Apply COHP output template
+225  Apply work-function/potential template
+226  Enable/edit DFT+U
+227  Apply DFT+U convergence-aid template
+228  Disable DFT+U
+229  Clear DFT+U convergence-aid settings
+230  Apply ELF cube-output template
+231  Apply charge-density cube-output template
 0    Back to previous menu
 q    Quit abacuskit
 ```
 
 模板说明：
 
-- `319` 会写入 `vdw_method`，可选 `d3_bj`、`d3_0`、`d2` 或关闭。
-- `320` 会写入 `efield_flag true`、`dip_cor_flag true`、`efield_dir 2`、`efield_amp 0`，默认 Z 方向偶极修正。
-- `321` / `322` 会切到 `nscf` 并设置 `init_chg=file`、`read_file_dir=./`、`out_dos` 等参数；需要先有 SCF 电荷密度并准备较密 KPT。
-- `323` 会切到 `nscf` 并设置 `out_band=1`、`out_proj_band=1`；需要自己准备 line-mode `KPT`。
-- `324` 会切到 LCAO SCF，并写入 `out_mat_hs="1 8"`、`out_wfc_lcao=1`、`out_app_flag=1`，作为内置 COHP/COOP 后处理所需输出模板。
-- `325` 会打开 `out_pot=2` 和 Z 方向偶极修正，作为 slab 功函数/静电势模板。
-- `330` 会写入 `out_elf="1 3"`，让 ABACUS 在 `OUT.<suffix>` 输出 ELF cube。
-- `331` 会写入 `out_chg="1 3"`，让 ABACUS 在 `OUT.<suffix>` 输出电荷密度 cube。
+- `219` 会写入 `vdw_method`，可选 `d3_bj`、`d3_0`、`d2` 或关闭。
+- `220` 会写入 `efield_flag true`、`dip_cor_flag true`、`efield_dir 2`、`efield_amp 0`，默认 Z 方向偶极修正。
+- `221` / `222` 会切到 `nscf` 并设置 `init_chg=file`、`read_file_dir=./`、`out_dos` 等参数，同时不写 `kspacing`；需要先有 SCF 电荷密度并准备较密 KPT。
+- `223` 会切到 `nscf` 并设置 `out_band=1`、`out_proj_band=1`，同时不写 `kspacing`；需要自己准备 line-mode `KPT`，避免 ABACUS 按 `kspacing` 自动生成网格并覆盖高对称路径。
+- `224` 会切到 LCAO SCF，并写入 `out_mat_hs="1 8"`、`out_wfc_lcao=1`、`out_app_flag=1`，作为内置 COHP/COOP 后处理所需输出模板。
+- `225` 会打开 `out_pot=2` 和 Z 方向偶极修正，作为 slab 功函数/静电势模板。
+- `230` 会写入 `out_elf="1 3"`，让 ABACUS 在 `OUT.<suffix>` 输出 ELF cube。
+- `231` 会写入 `out_chg="1 3"`，让 ABACUS 在 `OUT.<suffix>` 输出电荷密度 cube。
 - 设置 `nspin=2` 后，生成的 `INPUT` 会显式写出 `mixing_beta_mag`、`mixing_gg0`、`mixing_gg0_mag`、`mixing_gg0_min`、`mixing_restart`、`mixing_dmr`，方便后续手动调磁性态收敛。
-- `326` 会写入 DFT+U 参数：`dft_plus_u`、`orbital_corr`、`hubbard_u`、`yukawa_potential`、`omc`，mode 1 还会写入 `onsite_radius`。`orbital_corr` 和 `hubbard_u` 的列表顺序要与 `STRU` 里的原子类型顺序一致。
-- `327` 会写入 DFT+U 常用收敛辅助参数：`mixing_restart`、`mixing_dmr`、`uramping`。
+- `226` 会写入 DFT+U 参数：`dft_plus_u`、`orbital_corr`、`hubbard_u`、`yukawa_potential`、`omc`，mode 1 还会写入 `onsite_radius`。`orbital_corr` 和 `hubbard_u` 的列表顺序要与 `STRU` 里的原子类型顺序一致。
+- `227` 会写入 DFT+U 常用收敛辅助参数：`mixing_restart`、`mixing_dmr`、`uramping`。
 
 ## 路径配置
 
@@ -532,7 +532,7 @@ LDOS 支持 ABACUS 的 `LDOS.txt` 线扫描文件；如果输出的是 `LDOS_*eV
 
 ## 11. 绘制 ELF / 电荷密度 / 电荷密度差
 
-先用 `2 -> 330` 或 `2 -> 331` 生成包含 `out_elf 1 3` / `out_chg 1 3` 的 `INPUT`，运行 ABACUS 后会在 `OUT.<suffix>` 下得到 cube 文件。
+先用 `2 -> 230` 或 `2 -> 231` 生成包含 `out_elf 1 3` / `out_chg 1 3` 的 `INPUT`，运行 ABACUS 后会在 `OUT.<suffix>` 下得到 cube 文件。
 
 绘制 ELF 或电荷密度 cube 的中间切片：
 
@@ -628,7 +628,7 @@ bash run_deepmd.sh
 --type-map C H O Ni
 ```
 
-## 13. 一键生成流程骨架
+## 15. 一键生成流程骨架
 
 ```bash
 abacuskit init-workflow --out my_abacus_deepmd_project
