@@ -1,6 +1,6 @@
 # abacuskit
 
-![abacuskit logo](figure/abacuskit_logo.png)
+![abacuskit logo](figure/abacuskit_logo.svg)
 
 `abacuskit` 是一个集成式 ABACUS + DeepMD 命令行程序，用于生成 ABACUS 输入文件、准备批量任务、检查/汇总计算结果，并把 ABACUS 输出转换为 DeepMD 数据。
 
