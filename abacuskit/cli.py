@@ -25,27 +25,163 @@ from pathlib import Path
 from typing import Iterable
 
 import numpy as np
+from ase import Atoms
 from ase.data import atomic_masses, atomic_numbers
 from ase.io import read, write
 
 try:
     from . import __affiliation__, __author__, __version__
+    from .cohp import build_orbital_map, format_orbital_map, resolve_orbital_arguments, run_cohp
 except ImportError:
-    __version__ = "v1.1.1"
+    __version__ = "v1.2"
     __author__ = "Han Enci, Zhong Lisheng, Yu Yutong, Xu Mengting, Chen Jingyuan"
     __affiliation__ = "Xi'an University of Technology"
+    from cohp import build_orbital_map, format_orbital_map, resolve_orbital_arguments, run_cohp
 
 BOHR_PER_ANGSTROM = 1.88972612546
+USER_CONFIG_PATH = Path.home() / ".abacuskit" / "config.json"
 
 
 def env_path(name: str, default: str | Path) -> Path:
     return Path(os.environ.get(name, str(default))).expanduser()
 
 
-DEFAULT_PSEUDO_DIR = env_path("ABACUSKIT_PSEUDO_DIR", "pseudopotentials")
+APNS_RESOURCE_NAMES = {
+    "pseudo": "apns-pseudopotentials-v1",
+    "orbital_efficiency": "apns-orbitals-efficiency-v1",
+    "orbital_precision": "apns-orbitals-precision-v1",
+}
+RESOURCE_CONFIG_KEYS = {
+    "ABACUSKIT_PSEUDO_DIR": "pseudo_dir",
+    "ABACUSKIT_ORBITAL_EFFICIENCY_DIR": "orbital_efficiency_dir",
+    "ABACUSKIT_ORBITAL_PRECISION_DIR": "orbital_precision_dir",
+}
+
+
+def load_user_config() -> dict[str, object]:
+    if not USER_CONFIG_PATH.is_file():
+        return {}
+    try:
+        data = json.loads(USER_CONFIG_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+USER_CONFIG = load_user_config()
+
+
+def unique_existing_dirs(paths: Iterable[Path]) -> list[Path]:
+    result: list[Path] = []
+    seen: set[Path] = set()
+    for path in paths:
+        expanded = path.expanduser()
+        try:
+            resolved = expanded.resolve()
+        except OSError:
+            resolved = expanded.absolute()
+        if resolved in seen or not expanded.is_dir():
+            continue
+        seen.add(resolved)
+        result.append(expanded)
+    return result
+
+
+def apns_search_roots() -> list[Path]:
+    env_roots = os.environ.get("ABACUSKIT_APNS_SEARCH_ROOTS") or os.environ.get("ABACUSKIT_APNS_ROOT")
+    roots: list[Path] = []
+    if env_roots:
+        roots.extend(Path(item) for item in env_roots.split(os.pathsep) if item)
+    home = Path.home()
+    cwd = Path.cwd()
+    roots.extend(
+        [
+            cwd,
+            cwd.parent,
+            home / "data" / "abacus-lib",
+            home / "data",
+            home / "apps" / "abacus-lib",
+            home / "apps",
+            home,
+            Path("/opt"),
+            Path("/usr/local/share"),
+        ]
+    )
+    return unique_existing_dirs(roots)
+
+
+def direct_apns_candidates(name: str, roots: list[Path]) -> list[Path]:
+    candidates: list[Path] = []
+    for root in roots:
+        candidates.extend(
+            [
+                root / name,
+                root / "abacus-lib" / name,
+                root / "data" / "abacus-lib" / name,
+                root / "apps" / "abacus-lib" / name,
+            ]
+        )
+    return candidates
+
+
+def walk_find_apns_dir(name: str, roots: list[Path], max_depth: int = 5) -> Path | None:
+    skip_names = {
+        ".cache",
+        ".conda",
+        ".git",
+        ".local",
+        "__pycache__",
+        "node_modules",
+    }
+    for root in roots:
+        base_depth = len(root.parts)
+        try:
+            walker = os.walk(root)
+            for current, dirs, _ in walker:
+                current_path = Path(current)
+                depth = len(current_path.parts) - base_depth
+                if depth >= max_depth:
+                    dirs[:] = []
+                else:
+                    dirs[:] = [item for item in dirs if item not in skip_names and not item.startswith(".")]
+                if current_path.name == name:
+                    return current_path
+        except OSError:
+            continue
+    return None
+
+
+def find_apns_dir(name: str) -> Path | None:
+    roots = apns_search_roots()
+    for candidate in direct_apns_candidates(name, roots):
+        if candidate.is_dir():
+            return candidate
+    return walk_find_apns_dir(name, roots)
+
+
+def resource_path(env_name: str, apns_name: str, fallback: str | Path) -> Path:
+    if env_name in os.environ:
+        return Path(os.environ[env_name]).expanduser()
+    config_key = RESOURCE_CONFIG_KEYS.get(env_name)
+    if config_key:
+        configured = USER_CONFIG.get(config_key)
+        if isinstance(configured, str) and configured:
+            return Path(configured).expanduser()
+    return find_apns_dir(apns_name) or Path(fallback).expanduser()
+
+
+DEFAULT_PSEUDO_DIR = resource_path("ABACUSKIT_PSEUDO_DIR", APNS_RESOURCE_NAMES["pseudo"], "pseudopotentials")
 DEFAULT_ORBITAL_DIRS = {
-    "efficiency": env_path("ABACUSKIT_ORBITAL_EFFICIENCY_DIR", "orbitals/efficiency"),
-    "precision": env_path("ABACUSKIT_ORBITAL_PRECISION_DIR", "orbitals/precision"),
+    "efficiency": resource_path(
+        "ABACUSKIT_ORBITAL_EFFICIENCY_DIR",
+        APNS_RESOURCE_NAMES["orbital_efficiency"],
+        "orbitals/efficiency",
+    ),
+    "precision": resource_path(
+        "ABACUSKIT_ORBITAL_PRECISION_DIR",
+        APNS_RESOURCE_NAMES["orbital_precision"],
+        "orbitals/precision",
+    ),
 }
 DEFAULT_ABACUS_ROOT = env_path("ABACUSKIT_ABACUS_ROOT", "~/apps/abacus")
 DEFAULT_ABACUS_ENV = env_path(
@@ -415,8 +551,247 @@ def build_move_flags(
     return flags
 
 
+def clean_stru_lines(path: Path) -> list[str]:
+    lines: list[str] = []
+    for raw in path.read_text(errors="ignore").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if line:
+            lines.append(line)
+    return lines
+
+
+def find_stru_section(lines: list[str], name: str) -> int | None:
+    target = name.upper()
+    for idx, line in enumerate(lines):
+        if line.upper() == target:
+            return idx
+    return None
+
+
+def parse_stru_atoms(path: Path):
+    lines = clean_stru_lines(path)
+    lattice_constant = 1.0
+    idx = find_stru_section(lines, "LATTICE_CONSTANT")
+    if idx is not None and idx + 1 < len(lines):
+        lattice_constant = float(lines[idx + 1].split()[0])
+
+    idx = find_stru_section(lines, "LATTICE_VECTORS")
+    if idx is None or idx + 3 >= len(lines):
+        die(f"cannot find LATTICE_VECTORS in {path}")
+    cell_bohr = np.array([[float(x) for x in lines[idx + offset].split()[:3]] for offset in (1, 2, 3)])
+    cell = cell_bohr * lattice_constant / BOHR_PER_ANGSTROM
+
+    idx = find_stru_section(lines, "ATOMIC_POSITIONS")
+    if idx is None or idx + 1 >= len(lines):
+        die(f"cannot find ATOMIC_POSITIONS in {path}")
+    coord_type = lines[idx + 1].strip().lower()
+    scaled = coord_type.startswith(("direct", "crystal"))
+    cartesian_angstrom = "angstrom" in coord_type
+
+    symbols: list[str] = []
+    positions: list[list[float]] = []
+    cursor = idx + 2
+    while cursor < len(lines):
+        symbol = lines[cursor].split()[0]
+        if symbol.upper() in {"ATOMIC_SPECIES", "NUMERICAL_ORBITAL", "LATTICE_CONSTANT", "LATTICE_VECTORS"}:
+            break
+        if symbol not in atomic_numbers:
+            cursor += 1
+            continue
+        if cursor + 2 >= len(lines):
+            die(f"incomplete ATOMIC_POSITIONS block for {symbol} in {path}")
+        try:
+            count = int(float(lines[cursor + 2].split()[0]))
+        except ValueError:
+            die(f"bad atom count for {symbol} in {path}: {lines[cursor + 2]}")
+        start = cursor + 3
+        for line in lines[start : start + count]:
+            parts = line.split()
+            if len(parts) < 3:
+                die(f"bad atomic position line in {path}: {line}")
+            symbols.append(symbol)
+            positions.append([float(parts[0]), float(parts[1]), float(parts[2])])
+        cursor = start + count
+
+    if not symbols:
+        die(f"cannot parse atoms from {path}")
+    if scaled:
+        atoms = Atoms(symbols=symbols, scaled_positions=positions, cell=cell, pbc=True)
+    else:
+        factor = 1.0 if cartesian_angstrom else lattice_constant / BOHR_PER_ANGSTROM
+        atoms = Atoms(symbols=symbols, positions=np.array(positions) * factor, cell=cell, pbc=True)
+    return atoms
+
+
+def canonicalize_axis_aligned_atoms(atoms):
+    cell = np.array(atoms.cell.array, dtype=float)
+    if cell.shape != (3, 3):
+        return atoms
+
+    tol = max(1.0e-8, float(np.max(np.abs(cell))) * 1.0e-8)
+    axis_for_row: list[int] = []
+    lengths = np.zeros(3)
+    for row in cell:
+        nonzero = [idx for idx, value in enumerate(row) if abs(value) > tol]
+        if len(nonzero) != 1:
+            return atoms
+        axis = nonzero[0]
+        if axis in axis_for_row:
+            return atoms
+        axis_for_row.append(axis)
+        lengths[axis] = abs(float(row[axis]))
+
+    if np.any(lengths <= tol):
+        return atoms
+    return Atoms(
+        symbols=atoms.get_chemical_symbols(),
+        positions=atoms.get_positions(),
+        cell=np.diag(lengths),
+        pbc=atoms.pbc,
+    )
+
+
+def fix_stru_range(
+    stru: Path,
+    out: Path,
+    axis: str,
+    lower: float,
+    upper: float,
+    backup: bool = True,
+) -> int:
+    if lower > upper:
+        lower, upper = upper, lower
+    axis_index = {"x": 0, "y": 1, "z": 2}[axis]
+    raw_lines = stru.read_text(errors="ignore").splitlines()
+    original_lines = list(raw_lines)
+    entries: list[tuple[int, str]] = []
+    for raw_idx, raw in enumerate(raw_lines):
+        line = raw.split("#", 1)[0].strip()
+        if line:
+            entries.append((raw_idx, line))
+    cleaned = [line for _, line in entries]
+    idx = find_stru_section(cleaned, "ATOMIC_POSITIONS")
+    if idx is None or idx + 1 >= len(cleaned):
+        die(f"cannot find ATOMIC_POSITIONS in {stru}")
+    coord_type = cleaned[idx + 1].strip().lower()
+    if not coord_type.startswith("cartesian"):
+        die("fix-stru-range currently supports Cartesian ATOMIC_POSITIONS only")
+
+    fixed = 0
+    cursor = idx + 2
+    while cursor < len(cleaned):
+        symbol = cleaned[cursor].split()[0]
+        if symbol.upper() in {"ATOMIC_SPECIES", "NUMERICAL_ORBITAL", "LATTICE_CONSTANT", "LATTICE_VECTORS"}:
+            break
+        if symbol not in atomic_numbers:
+            cursor += 1
+            continue
+        if cursor + 2 >= len(cleaned):
+            die(f"incomplete ATOMIC_POSITIONS block for {symbol} in {stru}")
+        count = int(float(cleaned[cursor + 2].split()[0]))
+        start = cursor + 3
+        for line_idx in range(start, start + count):
+            if line_idx >= len(cleaned):
+                die(f"incomplete coordinate list for {symbol} in {stru}")
+            parts = cleaned[line_idx].split()
+            if len(parts) < 3:
+                die(f"bad atomic position line in {stru}: {cleaned[line_idx]}")
+            coord = float(parts[axis_index])
+            if lower <= coord <= upper:
+                coords = [float(parts[0]), float(parts[1]), float(parts[2])]
+                raw_idx = entries[line_idx][0]
+                raw_lines[raw_idx] = f"{coords[0]:18.10f} {coords[1]:18.10f} {coords[2]:18.10f} 0 0 0"
+                fixed += 1
+        cursor = start + count
+
+    if fixed == 0:
+        print(f"No atoms matched {axis} in [{lower:g}, {upper:g}].")
+    if out.resolve() == stru.resolve() and backup:
+        backup_path = stru.with_suffix(stru.suffix + ".bak") if stru.suffix else stru.with_name(stru.name + ".bak")
+        backup_path.write_text("\n".join(original_lines) + "\n")
+        print(f"backed up original STRU to {backup_path}")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("\n".join(raw_lines) + "\n")
+    return fixed
+
+
+def swap_yz_values(values: list[float]) -> list[float]:
+    return [values[0], values[2], values[1]]
+
+
+def rotate_stru_vacuum_z_to_y(
+    stru: Path,
+    out: Path,
+    backup: bool = True,
+) -> None:
+    raw_lines = stru.read_text(errors="ignore").splitlines()
+    original_lines = list(raw_lines)
+    entries: list[tuple[int, str]] = []
+    for raw_idx, raw in enumerate(raw_lines):
+        line = raw.split("#", 1)[0].strip()
+        if line:
+            entries.append((raw_idx, line))
+    cleaned = [line for _, line in entries]
+
+    idx = find_stru_section(cleaned, "LATTICE_VECTORS")
+    if idx is None or idx + 3 >= len(cleaned):
+        die(f"cannot find LATTICE_VECTORS in {stru}")
+    for line_idx in range(idx + 1, idx + 4):
+        parts = cleaned[line_idx].split()
+        if len(parts) < 3:
+            die(f"bad lattice vector line in {stru}: {cleaned[line_idx]}")
+        vector = swap_yz_values([float(parts[0]), float(parts[1]), float(parts[2])])
+        raw_idx = entries[line_idx][0]
+        raw_lines[raw_idx] = f"{vector[0]:18.10f} {vector[1]:18.10f} {vector[2]:18.10f}"
+
+    idx = find_stru_section(cleaned, "ATOMIC_POSITIONS")
+    if idx is None or idx + 1 >= len(cleaned):
+        die(f"cannot find ATOMIC_POSITIONS in {stru}")
+    coord_type = cleaned[idx + 1].strip().lower()
+    if not coord_type.startswith("cartesian"):
+        die("rotate-vacuum-z-to-y currently supports Cartesian ATOMIC_POSITIONS only")
+
+    cursor = idx + 2
+    while cursor < len(cleaned):
+        symbol = cleaned[cursor].split()[0]
+        if symbol.upper() in {"ATOMIC_SPECIES", "NUMERICAL_ORBITAL", "LATTICE_CONSTANT", "LATTICE_VECTORS"}:
+            break
+        if symbol not in atomic_numbers:
+            cursor += 1
+            continue
+        if cursor + 2 >= len(cleaned):
+            die(f"incomplete ATOMIC_POSITIONS block for {symbol} in {stru}")
+        count = int(float(cleaned[cursor + 2].split()[0]))
+        start = cursor + 3
+        for line_idx in range(start, start + count):
+            if line_idx >= len(cleaned):
+                die(f"incomplete coordinate list for {symbol} in {stru}")
+            parts = cleaned[line_idx].split()
+            if len(parts) < 3:
+                die(f"bad atomic position line in {stru}: {cleaned[line_idx]}")
+            coords = swap_yz_values([float(parts[0]), float(parts[1]), float(parts[2])])
+            flags = parts[3:6] if len(parts) >= 6 else ["1", "1", "1"]
+            flags = [flags[0], flags[2], flags[1]]
+            raw_idx = entries[line_idx][0]
+            raw_lines[raw_idx] = (
+                f"{coords[0]:18.10f} {coords[1]:18.10f} {coords[2]:18.10f} "
+                f"{flags[0]} {flags[1]} {flags[2]}"
+            )
+        cursor = start + count
+
+    if out.resolve() == stru.resolve() and backup:
+        backup_path = stru.with_suffix(stru.suffix + ".bak") if stru.suffix else stru.with_name(stru.name + ".bak")
+        backup_path.write_text("\n".join(original_lines) + "\n")
+        print(f"backed up original STRU to {backup_path}")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("\n".join(raw_lines) + "\n")
+
+
 def read_atoms(path: Path, supercell: tuple[int, int, int] = (1, 1, 1)):
-    atoms = read(path)
+    if path.name.upper() == "STRU":
+        atoms = parse_stru_atoms(path)
+    else:
+        atoms = read(path)
     if any(n != 1 for n in supercell):
         atoms = atoms.repeat(supercell)
     return atoms
@@ -463,8 +838,9 @@ def make_input(
         ("mixing_ndim", 20),
         ("cal_force", 1),
         ("cal_stress", 1 if cal_stress else 0),
-        ("out_wfc_lcao", 0),
     ]
+    if "out_wfc_lcao" not in extra:
+        params.append(("out_wfc_lcao", 0))
     if "out_chg" not in extra:
         params.append(("out_chg", 0))
     if calculation == "md":
@@ -518,8 +894,9 @@ def input_template_params(args) -> list[tuple[str, object]]:
         ("mixing_ndim", 20),
         ("cal_force", 1),
         ("cal_stress", 1 if args.kind == "relax" or args.cal_stress else 0),
-        ("out_wfc_lcao", 0),
     ]
+    if "out_wfc_lcao" not in extra:
+        params.append(("out_wfc_lcao", 0))
     if "out_chg" not in extra:
         params.append(("out_chg", 0))
     if args.kind == "relax":
@@ -573,9 +950,165 @@ def write_kpt(path: Path, mesh: tuple[int, int, int], shift: tuple[int, int, int
     path.write_text("\n".join(lines) + "\n")
 
 
+def seekpath_label(label: str) -> str:
+    clean = label.replace("\\Gamma", "GAMMA").replace("Gamma", "GAMMA").replace("Γ", "GAMMA")
+    return clean.replace("$", "").replace("\\", "")
+
+
+def atoms_to_seekpath_structure(atoms):
+    if atoms.cell is None or abs(atoms.cell.volume) < 1.0e-8:
+        die("structure has no valid periodic cell")
+    numbers = atoms.get_atomic_numbers()
+    if not len(numbers):
+        die("structure has no atoms")
+    return (
+        atoms.cell.array,
+        atoms.get_scaled_positions(wrap=True),
+        numbers,
+    )
+
+
+def get_seekpath_result(args) -> dict:
+    try:
+        import seekpath
+    except ImportError as exc:
+        die("high-symmetry KPT generation needs seekpath and spglib; reinstall with: pip install -U abacuskit")
+        raise exc
+
+    atoms = read_atoms(args.structure)
+    structure = atoms_to_seekpath_structure(atoms)
+    return seekpath.get_path(
+        structure,
+        with_time_reversal=not args.no_time_reversal,
+        recipe="hpkot",
+        threshold=args.threshold,
+        symprec=args.symprec,
+        angle_tolerance=args.angle_tolerance,
+    )
+
+
+def kpath_special_points(seek_result: dict, points_per_segment: int) -> list[tuple[str, tuple[float, float, float], int]]:
+    coords = seek_result["point_coords"]
+    path = seek_result["path"]
+    special: list[tuple[str, tuple[float, float, float], int]] = []
+    previous_end: str | None = None
+    for start, end in path:
+        if previous_end != start:
+            special.append((start, tuple(coords[start]), points_per_segment))
+        elif special:
+            special[-1] = (special[-1][0], special[-1][1], points_per_segment)
+        special.append((end, tuple(coords[end]), 1))
+        previous_end = end
+    if not special:
+        die("seekpath did not return a high-symmetry k-path")
+    return special
+
+
+def write_kpt_path(
+    path: Path,
+    special_points: list[tuple[str, tuple[float, float, float], int]],
+    comment: str,
+) -> None:
+    lines = [
+        "K_POINTS",
+        str(len(special_points)),
+        "Line",
+    ]
+    for label, coords, count in special_points:
+        lines.append(
+            f"{coords[0]: .10f} {coords[1]: .10f} {coords[2]: .10f} {count:d} # {seekpath_label(label)}"
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n")
+    if comment:
+        print(comment)
+
+
+def write_high_symmetry_points(path: Path, seek_result: dict) -> None:
+    lines = [
+        "# High-symmetry points generated by SeeK-path/HPKOT",
+        f"# bravais_lattice: {seek_result.get('bravais_lattice', 'unknown')}",
+        f"# bravais_lattice_extended: {seek_result.get('bravais_lattice_extended', 'unknown')}",
+    ]
+    for label, coords in sorted(seek_result["point_coords"].items()):
+        lines.append(f"{seekpath_label(label):<12} {coords[0]: .10f} {coords[1]: .10f} {coords[2]: .10f}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n")
+
+
 def cmd_kpt(args) -> None:
     write_kpt(args.out, tuple(args.mesh), tuple(args.shift), args.model)
     print(f"wrote {args.model} KPT to {args.out}")
+
+
+def reciprocal_mesh_from_kspacing(atoms, kspacing: float) -> tuple[int, int, int]:
+    if kspacing <= 0:
+        die("kspacing must be positive")
+    reciprocal_lengths = atoms.cell.reciprocal().lengths() * (2.0 * math.pi)
+    return tuple(max(1, int(math.ceil(float(length) / kspacing))) for length in reciprocal_lengths)
+
+
+def cmd_kpt_path(args) -> None:
+    if args.points_per_segment < 1:
+        die("--points-per-segment must be at least 1")
+    seek_result = get_seekpath_result(args)
+    special_points = kpath_special_points(seek_result, args.points_per_segment)
+    write_kpt_path(
+        args.out,
+        special_points,
+        (
+            "SeeK-path bravais lattice: "
+            f"{seek_result.get('bravais_lattice', 'unknown')} "
+            f"({seek_result.get('bravais_lattice_extended', 'unknown')})"
+        ),
+    )
+    if args.high_symmetry_points:
+        write_high_symmetry_points(args.high_symmetry_points, seek_result)
+        print(f"wrote high-symmetry point table {args.high_symmetry_points}")
+    print(f"wrote SeeK-path line-mode KPT to {args.out}")
+
+
+def find_default_structure_file(root: Path = Path(".")) -> Path | None:
+    candidates = [
+        root / "STRU",
+        root / "POSCAR",
+        root / "CONTCAR",
+    ]
+    candidates.extend(sorted(root.glob("*.cif"), key=lambda p: natural_key(p.name)))
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+def cmd_kpt_auto(args) -> None:
+    structure = args.structure or find_default_structure_file()
+    if not structure:
+        die("cannot auto-generate KPT because no STRU/POSCAR/CONTCAR/CIF was found in current directory")
+
+    if args.mode in {"auto", "path"}:
+        path_args = argparse.Namespace(
+            structure=structure,
+            out=args.out,
+            high_symmetry_points=args.high_symmetry_points,
+            points_per_segment=args.points_per_segment,
+            symprec=args.symprec,
+            angle_tolerance=args.angle_tolerance,
+            threshold=args.threshold,
+            no_time_reversal=args.no_time_reversal,
+        )
+        try:
+            cmd_kpt_path(path_args)
+            return
+        except SystemExit:
+            if args.mode == "path":
+                raise
+            print("High-symmetry KPT generation failed; falling back to regular Gamma mesh.")
+
+    atoms = read_atoms(structure)
+    mesh = reciprocal_mesh_from_kspacing(atoms, args.kspacing)
+    write_kpt(args.out, mesh, (0, 0, 0), "gamma")
+    print(f"wrote Gamma KPT to {args.out}; kspacing={args.kspacing:g}, mesh={mesh[0]} {mesh[1]} {mesh[2]}")
 
 
 def default_cpu_bind(mpi_np: int) -> str:
@@ -1636,6 +2169,227 @@ def maybe_shift_fermi(x: np.ndarray, fermi: float | None) -> tuple[np.ndarray, s
     return x - fermi, "Energy - E_F (eV)"
 
 
+def parse_fermi_energy(text: str) -> float | None:
+    patterns = [
+        r"\bEFERMI\s*=\s*([-+0-9.eE]+)\s*eV",
+        r"\bE_Fermi(?:_up|_dw)?\s+[-+0-9.eE]+\s+([-+0-9.eE]+)",
+        r"\bE_Fermi(?:_up|_dw)?\s*[:=]\s*([-+0-9.eE]+)\s*eV",
+    ]
+    for pattern in patterns:
+        value = parse_last_float(pattern, text)
+        if value is not None:
+            return value
+    return None
+
+
+def find_fermi_energy(root: Path) -> tuple[float | None, Path | None]:
+    primary: list[Path] = []
+    fallback: list[Path] = []
+    search_roots = [root.parent if root.is_file() else root]
+    outdir = find_abacus_outdir(search_roots[0])
+    if outdir:
+        search_roots.append(outdir)
+    for base in search_roots:
+        if base.is_file() and base.name.startswith("running_"):
+            primary.append(base)
+        elif base.is_dir():
+            primary.extend(sorted(base.glob("running_*.log"), key=lambda p: (p.stat().st_mtime, natural_key(p.name))))
+            outdir = find_abacus_outdir(base)
+            if outdir and outdir != base:
+                primary.extend(sorted(outdir.glob("running_*.log"), key=lambda p: (p.stat().st_mtime, natural_key(p.name))))
+            scf_out = base.parent / "scf" / "OUT.ABACUS"
+            if scf_out.is_dir():
+                fallback.extend(sorted(scf_out.glob("running_*.log"), key=lambda p: (p.stat().st_mtime, natural_key(p.name))))
+    seen: set[Path] = set()
+    for group in (primary, fallback):
+        unique = []
+        for path in group:
+            resolved = path.resolve()
+            if resolved not in seen:
+                seen.add(resolved)
+                unique.append(path)
+        for log in reversed(unique):
+            fermi = parse_fermi_energy(log.read_text(errors="ignore"))
+            if fermi is not None:
+                return fermi, log
+    return None, None
+
+
+def find_band_file(root: Path, explicit: Path | None = None) -> Path | None:
+    if explicit:
+        return explicit.expanduser()
+    if root.is_file():
+        return root
+    outdir = resolve_out_path(root)
+    return find_first_file(outdir, ["BANDS_1.dat", "BANDS_1"], ["BANDS*.dat", "BANDS*"])
+
+
+def kpoint_label(coords: tuple[float, float, float]) -> str:
+    common = {
+        (0.0, 0.0, 0.0): r"$\Gamma$",
+        (0.5, 0.0, 0.0): "X",
+        (0.0, 0.5, 0.0): "Y",
+        (0.0, 0.0, 0.5): "Z",
+        (0.5, 0.5, 0.0): "M",
+        (0.5, 0.0, 0.5): "A",
+        (0.0, 0.5, 0.5): "B",
+        (0.5, 0.5, 0.5): "R",
+    }
+    rounded = tuple(round(x, 6) for x in coords)
+    if rounded in common:
+        return common[rounded]
+    return "(" + ",".join(f"{x:g}" for x in rounded) + ")"
+
+
+def find_kpt_file(root: Path) -> Path | None:
+    if root.is_file():
+        root = root.parent
+    candidates = [root / "KPT", root.parent / "KPT"]
+    outdir = find_abacus_outdir(root)
+    if outdir:
+        candidates += [outdir / "KPT", outdir.parent / "KPT"]
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+def parse_line_kpt_ticks(kpt: Path | None, x: np.ndarray) -> tuple[list[float], list[str]]:
+    if not kpt or not kpt.is_file():
+        return [float(x[0]), float(x[-1])], ["", ""]
+    lines = [line.split("#", 1)[0].strip() for line in kpt.read_text(errors="ignore").splitlines()]
+    lines = [line for line in lines if line]
+    if len(lines) < 4 or lines[2].lower() != "line":
+        return [float(x[0]), float(x[-1])], ["", ""]
+    try:
+        npoint = int(float(lines[1].split()[0]))
+    except ValueError:
+        return [float(x[0]), float(x[-1])], ["", ""]
+    points = []
+    for line in lines[3 : 3 + npoint]:
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        try:
+            coords = tuple(float(v) for v in parts[:3])
+            count = int(float(parts[3]))
+        except ValueError:
+            continue
+        points.append((coords, count))
+    if len(points) < 2:
+        return [float(x[0]), float(x[-1])], ["", ""]
+    indices = [0]
+    total = 0
+    for _, count in points[:-1]:
+        total += max(count, 1)
+        indices.append(min(total, len(x) - 1))
+    ticks = [float(x[i]) for i in indices]
+    labels = [kpoint_label(coords) for coords, _ in points[: len(ticks)]]
+    return ticks, labels
+
+
+def nearest_k_label(k_value: float, ticks: list[float], labels: list[str]) -> str:
+    if not ticks or not labels:
+        return f"k={k_value:.6f}"
+    idx = min(range(len(ticks)), key=lambda i: abs(ticks[i] - k_value))
+    if abs(ticks[idx] - k_value) < 1.0e-8 and idx < len(labels) and labels[idx]:
+        return labels[idx]
+    return f"k={k_value:.6f}"
+
+
+def analyze_band_gap(
+    shifted_bands: np.ndarray,
+    x: np.ndarray,
+    ticks: list[float],
+    labels: list[str],
+    tol: float = 1.0e-5,
+) -> dict[str, object]:
+    occupied = shifted_bands <= tol
+    unoccupied = shifted_bands > tol
+    if not occupied.any() or not unoccupied.any():
+        return {"gap_ev": 0.0, "kind": "metallic", "message": "metallic or incomplete occupied/unoccupied bands"}
+
+    vbm = float(shifted_bands[occupied].max())
+    cbm = float(shifted_bands[unoccupied].min())
+    gap = max(0.0, cbm - vbm)
+    v_indices = np.argwhere(np.isclose(shifted_bands, vbm, atol=tol))
+    c_indices = np.argwhere(np.isclose(shifted_bands, cbm, atol=tol))
+    v_k = int(v_indices[0][0])
+    c_k = int(c_indices[0][0])
+    direct = any(int(v[0]) == int(c[0]) for v in v_indices for c in c_indices)
+    kind = "direct" if direct else "indirect"
+    return {
+        "gap_ev": gap,
+        "kind": kind,
+        "vbm_ev": vbm,
+        "cbm_ev": cbm,
+        "vbm_k": float(x[v_k]),
+        "cbm_k": float(x[c_k]),
+        "vbm_label": nearest_k_label(float(x[v_k]), ticks, labels),
+        "cbm_label": nearest_k_label(float(x[c_k]), ticks, labels),
+    }
+
+
+def format_band_gap_message(gap_info: dict[str, object]) -> str:
+    if gap_info.get("kind") == "metallic":
+        return "Band gap: 0.000000 eV (metallic)"
+    return (
+        f"Band gap: {gap_info['gap_ev']:.6f} eV ({gap_info['kind']}); "
+        f"VBM {gap_info['vbm_ev']:.6f} eV at {gap_info['vbm_label']}, "
+        f"CBM {gap_info['cbm_ev']:.6f} eV at {gap_info['cbm_label']}"
+    )
+
+
+def cmd_plot_band(args) -> None:
+    os.environ.setdefault("MPLCONFIGDIR", "/tmp/abacuskit-matplotlib")
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    root = args.path.expanduser()
+    band_file = find_band_file(root, args.file)
+    if not band_file or not band_file.is_file():
+        die(f"cannot find BANDS_*.dat under {root}")
+    data = read_numeric_table(band_file)
+    if data.shape[1] < 3:
+        die(f"band file needs at least 3 columns: {band_file}")
+    fermi = args.fermi
+    fermi_log = None
+    if fermi is None:
+        fermi, fermi_log = find_fermi_energy(root if not root.is_file() else band_file.parent)
+    if fermi is None:
+        die("cannot determine Fermi energy from running_*.log; pass --fermi explicitly")
+
+    x = data[:, 1]
+    bands = data[:, 2:] - fermi
+    ticks, labels = parse_line_kpt_ticks(args.kpt or find_kpt_file(root), x)
+    gap_info = analyze_band_gap(bands, x, ticks, labels)
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(7.0, 5.0), dpi=args.dpi)
+    for i in range(bands.shape[1]):
+        ax.plot(x, bands[:, i], lw=args.linewidth, color=args.color)
+    for pos in ticks:
+        ax.axvline(pos, lw=0.5, color="0.55")
+    ax.axhline(0.0, lw=0.8, ls="--", color="0.25")
+    if ticks and labels:
+        ax.set_xticks(ticks)
+        ax.set_xticklabels(labels)
+    ax.set_xlim(float(x[0]), float(x[-1]))
+    ax.set_ylim(args.emin, args.emax)
+    ax.set_xlabel("K-path")
+    ax.set_ylabel(r"Energy - $E_F$ (eV)")
+    title = args.title or band_file.name
+    ax.set_title(title)
+    ax.grid(axis="y", alpha=0.2)
+    fig.tight_layout()
+    fig.savefig(args.out)
+    plt.close(fig)
+    source = f" from {fermi_log}" if fermi_log else ""
+    print(f"wrote BAND plot {args.out}; E_F = {fermi:.9f} eV{source}")
+    print(format_band_gap_message(gap_info))
+
+
 def cmd_plot_dos(args) -> None:
     os.environ.setdefault("MPLCONFIGDIR", "/tmp/abacuskit-matplotlib")
     import matplotlib
@@ -2005,6 +2759,14 @@ def prompt_float(label: str, default: float) -> float:
             print("Please enter a number.")
 
 
+def parse_coordinate_range(text: str) -> tuple[float, float]:
+    value = text.strip().replace(" ", "")
+    match = re.fullmatch(r"([-+]?\d+(?:\.\d*)?(?:[eE][-+]?\d+)?)\-([-+]?\d+(?:\.\d*)?(?:[eE][-+]?\d+)?)", value)
+    if not match:
+        die("coordinate range must be like a-b, for example 2-3")
+    return float(match.group(1)), float(match.group(2))
+
+
 def prompt_yes_no(label: str, default: bool = False) -> bool:
     default_text = "y" if default else "n"
     while True:
@@ -2362,7 +3124,7 @@ def interactive_cif2stru() -> None:
 
 
 def interactive_make_candidates() -> None:
-    print("\n[2] Make candidate CIFs\n")
+    print("\n[15] Make candidate CIFs\n")
     cif = choose_cif_from_current_dir()
     if cif is None:
         cif = prompt_path("Seed CIF file")
@@ -2381,7 +3143,7 @@ def interactive_make_candidates() -> None:
 
 
 def interactive_prepare_abacus() -> None:
-    print("\n[3] Prepare ABACUS jobs\n")
+    print("\n[14] Prepare ABACUS jobs\n")
     cifs = [Path(x).expanduser() for x in prompt_multi("CIF file or directory paths")]
     if not cifs:
         cifs = [prompt_path("CIF file or directory path", "01_candidates")]
@@ -2480,7 +3242,7 @@ Current settings:
   321) Apply DOS target template
   322) Apply PDOS target template
   323) Apply band structure target template
-  324) Apply COHP matrix-output template
+  324) Apply COHP output template
   325) Apply work-function/potential template
   326) Enable/edit DFT+U
   327) Apply DFT+U convergence-aid template
@@ -2530,10 +3292,11 @@ def apply_input_target_template(state: dict, target: str) -> None:
         print("Band target template applied. Prepare a line-mode KPT file before running ABACUS.")
     elif target == "cohp":
         state["kind"] = "scf"
-        set_extra_setting(state, "out_mat_hs2", 1)
-        set_extra_setting(state, "out_mat_hs", 1)
-        set_extra_setting(state, "out_app_flag", "false")
-        print("COHP matrix-output template applied. Use generated H/S matrices for COHP post-processing.")
+        state["basis_type"] = "lcao"
+        set_extra_setting(state, "out_mat_hs", "1 8")
+        set_extra_setting(state, "out_wfc_lcao", 1)
+        set_extra_setting(state, "out_app_flag", 1)
+        print("COHP output template applied. Run this LCAO SCF first, then use 132 for COHP post-processing.")
     elif target == "workfunc":
         state["kind"] = "scf"
         set_extra_setting(state, "out_pot", 2)
@@ -2674,7 +3437,7 @@ def interactive_input_template() -> None:
 
 
 def interactive_check_abacus() -> None:
-    print("\n[5] Check ABACUS job status in current directory\n")
+    print("\n[4] Check ABACUS job status in current directory\n")
     args = argparse.Namespace(jobs=[Path(".")], json=None, csv=None)
     cmd_check_abacus(args)
     print("ABACUS job check finished. Exiting abacuskit.")
@@ -2682,7 +3445,7 @@ def interactive_check_abacus() -> None:
 
 
 def interactive_launch_script() -> None:
-    print("\n[13] Create ABACUS launch scripts\n")
+    print("\n[18] Create ABACUS launch scripts\n")
     jobs = [Path(x).expanduser() for x in prompt_multi("ABACUS job directory paths")]
     if not jobs:
         jobs = [prompt_path("ABACUS job directory path", ".")]
@@ -2702,24 +3465,63 @@ def interactive_launch_script() -> None:
 
 
 def interactive_kpt() -> None:
-    print("\n[10] Generate ABACUS KPT\n")
-    mesh_text = prompt_text("K mesh nx ny nz", "3 3 1").replace(",", " ").split()
-    if len(mesh_text) != 3:
-        die("expected three integers, for example: 3 3 1")
-    shift_text = prompt_text("K shift sx sy sz", "0 0 0").replace(",", " ").split()
-    if len(shift_text) != 3:
-        die("expected three integers, for example: 0 0 0")
-    args = argparse.Namespace(
-        mesh=[int(x) for x in mesh_text],
-        shift=[int(x) for x in shift_text],
-        model=prompt_choice("KPT model", ["gamma", "mp"], "gamma"),
-        out=prompt_path("Output KPT file", "KPT"),
+    print(
+        """
+---------- 30x: Generate ABACUS KPT ----------
+  301) Generate regular Gamma mesh KPT using kspacing=0.14
+  302) Generate BAND high-symmetry line-mode KPT by SeeK-path
+  0) Back to previous menu
+  q) Quit abacuskit
+"""
     )
-    cmd_kpt(args)
+    choice = prompt_text("Enter 30x option", "301").lower()
+    if choice in {"q", "quit", "exit"}:
+        raise ProgramExit
+    if choice in {"0", "300"}:
+        return
+    if choice == "302":
+        structure = find_default_structure_file()
+        if not structure:
+            die("cannot find STRU/POSCAR/CONTCAR/CIF in current directory")
+        args = argparse.Namespace(
+            structure=structure,
+            out=Path("KPT"),
+            high_symmetry_points=Path("HIGH_SYMMETRY_POINTS"),
+            points_per_segment=20,
+            symprec=1.0e-5,
+            angle_tolerance=-1.0,
+            threshold=1.0e-7,
+            no_time_reversal=False,
+        )
+        cmd_kpt_path(args)
+        print("High-symmetry KPT generation finished. Exiting abacuskit.")
+        raise ProgramExit
+    if choice != "301":
+        print("Unknown 30x option.")
+        return
+
+    structure = find_default_structure_file()
+    if not structure:
+        die("cannot find STRU/POSCAR/CONTCAR/CIF in current directory")
+    args = argparse.Namespace(
+        structure=structure,
+        out=Path("KPT"),
+        kspacing=0.14,
+        mode="mesh",
+        high_symmetry_points=Path("HIGH_SYMMETRY_POINTS"),
+        points_per_segment=20,
+        symprec=1.0e-5,
+        angle_tolerance=-1.0,
+        threshold=1.0e-7,
+        no_time_reversal=False,
+    )
+    cmd_kpt_auto(args)
+    print("KPT generation finished. Exiting abacuskit.")
+    raise ProgramExit
 
 
 def interactive_conv_test() -> None:
-    print("\n[11] Prepare convergence-test jobs\n")
+    print("\n[16] Prepare convergence-test jobs\n")
     jobs = [Path(x).expanduser() for x in prompt_multi("Template ABACUS job paths")]
     if not jobs:
         jobs = [prompt_path("Template ABACUS job path", ".")]
@@ -2739,7 +3541,7 @@ def interactive_conv_test() -> None:
 
 
 def interactive_collect_report() -> None:
-    print("\n[12] Collect ABACUS metrics / report\n")
+    print("\n[17] Collect ABACUS metrics / report\n")
     jobs = [Path(x).expanduser() for x in prompt_multi("ABACUS job directory paths")]
     if not jobs:
         jobs = [prompt_path("ABACUS job directory path", "02_abacus_sp")]
@@ -2753,7 +3555,7 @@ def interactive_collect_report() -> None:
 
 
 def interactive_plot_dos() -> None:
-    print("\n[6] Plot DOS / PDOS / LDOS\n")
+    print("\n[11] Plot DOS / PDOS / LDOS\n")
     args = argparse.Namespace(
         path=prompt_path("ABACUS job or OUT.* directory"),
         kind=prompt_choice("Plot kind", ["auto", "dos", "pdos", "ldos"], "auto"),
@@ -2767,40 +3569,150 @@ def interactive_plot_dos() -> None:
     file_text = prompt_text("Explicit data file, empty for auto", "")
     args.file = Path(file_text).expanduser() if file_text else None
     cmd_plot_dos(args)
+    print("DOS/PDOS/LDOS plot finished. Exiting abacuskit.")
+    raise ProgramExit
 
 
-def interactive_plot_grid() -> None:
-    print("\n[14] Plot ELF / charge density / charge-density difference\n")
-    kind = prompt_choice("Plot kind", ["auto", "elf", "charge", "diff", "cube"], "auto")
+def interactive_plot_band() -> None:
+    print("\n[12] Plot BAND in current directory\n")
     args = argparse.Namespace(
-        path=prompt_path("ABACUS job, OUT.* directory, or cube file"),
+        path=Path("."),
+        file=None,
+        kpt=None,
+        fermi=None,
+        out=Path("band.png"),
+        emin=-12.0,
+        emax=8.0,
+        title=None,
+        linewidth=0.8,
+        color="C0",
+        dpi=300,
+    )
+    cmd_plot_band(args)
+    print("BAND plot finished. Exiting abacuskit.")
+    raise ProgramExit
+
+
+def run_interactive_plot_grid(kind: str, default_out: str) -> None:
+    args = argparse.Namespace(
+        path=Path("."),
         kind=kind,
         file=None,
         minus=None,
         minus_file=None,
         cube_out=None,
-        axis=prompt_choice("Slice axis", ["z", "x", "y"], "z"),
+        axis="z",
         index=None,
         cmap=None,
-        out=None,
+        out=Path(default_out),
     )
-    index_text = prompt_text("Slice index, empty for middle", "")
-    args.index = int(index_text) if index_text else None
-    file_text = prompt_text("Explicit cube file, empty for auto", "")
-    args.file = Path(file_text).expanduser() if file_text else None
     if kind == "diff":
         args.minus = prompt_path("Subtracted ABACUS job, OUT.* directory, or cube file")
         minus_file_text = prompt_text("Explicit subtracted cube file, empty for auto", "")
         args.minus_file = Path(minus_file_text).expanduser() if minus_file_text else None
         cube_out_text = prompt_text("Output difference cube", "charge_diff.cube")
         args.cube_out = Path(cube_out_text).expanduser() if cube_out_text else None
-    default_out = "charge_diff.png" if kind == "diff" else f"{kind if kind != 'auto' else 'grid'}.png"
-    args.out = prompt_path("Output image", default_out)
     cmd_plot_grid(args)
+    print("Grid plot finished. Exiting abacuskit.")
+    raise ProgramExit
+
+
+def interactive_plot_charge() -> None:
+    print("\n[8] Plot charge density in current directory\n")
+    run_interactive_plot_grid("charge", "charge.png")
+
+
+def interactive_plot_charge_diff() -> None:
+    print("\n[9] Plot charge-density difference in current directory\n")
+    run_interactive_plot_grid("diff", "charge_diff.png")
+
+
+def interactive_plot_elf() -> None:
+    print("\n[10] Plot ELF in current directory\n")
+    run_interactive_plot_grid("elf", "elf.png")
+
+
+def interactive_cohp() -> None:
+    print(
+        """
+---------- 13x: ABACUS LCAO COHP ----------
+  131) Generate COHP-ready SCF INPUT
+  132) List atom orbital channels / global NAO ranges
+  133) Calculate COHP/COOP from OUT.ABACUS
+  0) Back to previous menu
+  q) Quit abacuskit
+"""
+    )
+    choice = prompt_text("Enter 13x option", "131").lower()
+    if choice in {"q", "quit", "exit"}:
+        raise ProgramExit
+    if choice in {"0", "130"}:
+        return
+    if choice == "131":
+        state = default_input_state()
+        apply_input_target_template(state, "cohp")
+        state["out"] = prompt_path("Output COHP INPUT file", "INPUT.cohp")
+        run_input_from_state(state)
+        print("COHP INPUT generation finished. Run ABACUS with this INPUT before post-processing.")
+        raise ProgramExit
+    if choice == "132":
+        args = argparse.Namespace(
+            out_dir=prompt_path("ABACUS OUT.* directory", "OUT.ABACUS"),
+            stru=None,
+            input=None,
+            orbital_dir=None,
+        )
+        stru_text = prompt_text("Explicit STRU path, empty for auto", "")
+        input_text = prompt_text("Explicit INPUT path, empty for auto", "")
+        orbital_text = prompt_text("Explicit orbital_dir, empty for INPUT/default", "")
+        args.stru = Path(stru_text).expanduser() if stru_text else None
+        args.input = Path(input_text).expanduser() if input_text else None
+        args.orbital_dir = Path(orbital_text).expanduser() if orbital_text else None
+        cmd_cohp_orbitals(args)
+        raise ProgramExit
+    if choice == "133":
+        use_atom = prompt_yes_no("Use atom index + shell selector?", True)
+        args = argparse.Namespace(
+            out_dir=prompt_path("ABACUS OUT.* directory", "OUT.ABACUS"),
+            atom_i_index=None,
+            atom_j_index=None,
+            atom_i_orbs=None,
+            atom_j_orbs=None,
+            stru=None,
+            input=None,
+            orbital_dir=None,
+            method=prompt_choice("Method", ["COHP", "COOP"], "COHP"),
+            spin=prompt_choice("Spin channel", ["sum", "up", "down"], "sum"),
+            de=prompt_float("Energy grid step de/eV", 0.05),
+            no_smooth=not prompt_yes_no("Apply Gaussian smoothing?", True),
+            smooth_nstddev=prompt_float("Smoothing sigma in de units", 4.0),
+            emin=prompt_float("Plot Emin relative to E_Fermi/eV", -10.0),
+            emax=prompt_float("Plot Emax relative to E_Fermi/eV", 10.0),
+            width=None,
+            invert=prompt_yes_no("Plot -COHP/-COOP convention?", True),
+            output_prefix=prompt_path("Output prefix", "COHP"),
+        )
+        if use_atom:
+            args.atom_i_index = prompt_int("Atom I index, 1-based", 1)
+            args.atom_j_index = prompt_int("Atom J index, 1-based", 2)
+            args.atom_i_orbs = prompt_text("Atom I shells, e.g. all or 3d", "all")
+            args.atom_j_orbs = prompt_text("Atom J shells, e.g. all or 2p", "all")
+            stru_text = prompt_text("Explicit STRU path, empty for auto", "")
+            input_text = prompt_text("Explicit INPUT path, empty for auto", "")
+            orbital_text = prompt_text("Explicit orbital_dir, empty for INPUT/default", "")
+            args.stru = Path(stru_text).expanduser() if stru_text else None
+            args.input = Path(input_text).expanduser() if input_text else None
+            args.orbital_dir = Path(orbital_text).expanduser() if orbital_text else None
+        else:
+            args.atom_i_orbs = prompt_text("Atom/group I global NAO indices, comma-separated")
+            args.atom_j_orbs = prompt_text("Atom/group J global NAO indices, comma-separated")
+        cmd_cohp(args)
+        raise ProgramExit
+    print("Unknown 13x option.")
 
 
 def interactive_collect_deepmd() -> None:
-    print("\n[7] Collect ABACUS outputs to DeepMD data\n")
+    print("\n[19] Collect ABACUS outputs to DeepMD data\n")
     jobs = [Path(x).expanduser() for x in prompt_multi("ABACUS job directory paths")]
     if not jobs:
         jobs = [prompt_path("ABACUS job directory path", "02_abacus_sp")]
@@ -2818,7 +3730,7 @@ def interactive_collect_deepmd() -> None:
 
 
 def interactive_make_train() -> None:
-    print("\n[8] Make DeepMD training input\n")
+    print("\n[20] Make DeepMD training input\n")
     train_systems = [Path(x).expanduser() for x in prompt_multi("Training system paths")]
     valid_systems = [Path(x).expanduser() for x in prompt_multi("Validation system paths, empty for none")]
     type_map = prompt_multi("Type map, e.g. C H O Ni, empty to infer") or None
@@ -2833,9 +3745,185 @@ def interactive_make_train() -> None:
 
 
 def interactive_init_workflow() -> None:
-    print("\n[9] Init workflow skeleton\n")
+    print("\n[21] Init workflow skeleton\n")
     args = argparse.Namespace(out=prompt_path("Workflow root directory", "abacus_deepmd_project"))
     cmd_init_workflow(args)
+
+
+def apns_resource_status() -> dict[str, Path | None]:
+    return {
+        "pseudo_dir": find_apns_dir(APNS_RESOURCE_NAMES["pseudo"]),
+        "orbital_efficiency_dir": find_apns_dir(APNS_RESOURCE_NAMES["orbital_efficiency"]),
+        "orbital_precision_dir": find_apns_dir(APNS_RESOURCE_NAMES["orbital_precision"]),
+    }
+
+
+def print_apns_resource_status(resources: dict[str, Path | None]) -> None:
+    labels = {
+        "pseudo_dir": "Pseudopotentials",
+        "orbital_efficiency_dir": "Orbitals efficiency",
+        "orbital_precision_dir": "Orbitals precision",
+    }
+    print("\nDetected APNS resource paths:")
+    for key, label in labels.items():
+        value = resources.get(key)
+        print(f"  {label:<20}: {value if value else 'not found'}")
+
+
+def save_user_config(updates: dict[str, str]) -> None:
+    config = dict(USER_CONFIG)
+    config.update(updates)
+    USER_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    USER_CONFIG_PATH.write_text(json.dumps(config, indent=2) + "\n")
+
+
+def interactive_config_apns_paths() -> None:
+    print("\n[22] Search and save APNS pseudopotential/orbital paths\n")
+    resources = apns_resource_status()
+    print_apns_resource_status(resources)
+
+    missing = [key for key, path in resources.items() if not path or not Path(path).expanduser().is_dir()]
+    if missing:
+        die("cannot save APNS config; missing valid directories: " + ", ".join(missing))
+
+    save_user_config({key: str(Path(path).expanduser()) for key, path in resources.items() if path})
+    print(f"Saved APNS paths to {USER_CONFIG_PATH}")
+    print("Future abacuskit runs will use this config unless command-line arguments or environment variables override it.")
+    raise ProgramExit
+
+
+def cmd_fix_stru_range(args) -> None:
+    fixed = fix_stru_range(
+        stru=args.stru,
+        out=args.out or args.stru,
+        axis=args.axis,
+        lower=args.min,
+        upper=args.max,
+        backup=not args.no_backup,
+    )
+    target = args.out or args.stru
+    print(f"fixed {fixed} atoms in xyz directions; wrote {target}")
+
+
+def cmd_rotate_vacuum_z_to_y(args) -> None:
+    rotate_stru_vacuum_z_to_y(
+        stru=args.stru,
+        out=args.out or args.stru,
+        backup=not args.no_backup,
+    )
+    target = args.out or args.stru
+    print(f"rotated vacuum direction from Z to Y; wrote {target}")
+
+
+def cmd_stru2cif(args) -> None:
+    atoms = canonicalize_axis_aligned_atoms(parse_stru_atoms(args.stru))
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    write(args.out, atoms, format="cif")
+    print(f"converted {args.stru} to CIF {args.out}")
+
+
+def cmd_cohp_orbitals(args) -> None:
+    out_dir = args.out_dir
+    stru = args.stru or (out_dir.parent / "STRU")
+    inp = args.input or (out_dir.parent / "INPUT")
+    if not stru.is_file():
+        die(f"cannot find STRU for orbital mapping: {stru}")
+    orbital_map = build_orbital_map(
+        stru_path=stru,
+        input_path=inp if inp.is_file() else None,
+        orbital_dir=args.orbital_dir,
+    )
+    print(format_orbital_map(orbital_map))
+
+
+def cmd_cohp(args) -> None:
+    try:
+        atom_i_orbs, atom_j_orbs, resolution = resolve_orbital_arguments(
+            out_dir=args.out_dir,
+            atom_i_orbs=args.atom_i_orbs,
+            atom_j_orbs=args.atom_j_orbs,
+            atom_i_index=args.atom_i_index,
+            atom_j_index=args.atom_j_index,
+            stru_path=args.stru,
+            input_path=args.input,
+            orbital_dir=args.orbital_dir,
+        )
+        metadata = run_cohp(
+            out_dir=args.out_dir,
+            atom_i_orbs=atom_i_orbs,
+            atom_j_orbs=atom_j_orbs,
+            method=args.method,
+            spin=args.spin,
+            de=args.de,
+            smooth=not args.no_smooth,
+            smooth_nstddev=args.smooth_nstddev,
+            invert=args.invert,
+            output_prefix=args.output_prefix,
+            emin=args.emin,
+            emax=args.emax,
+            width=args.width,
+        )
+    except (OSError, ValueError) as exc:
+        die(str(exc))
+
+    if resolution is not None:
+        sel_i, sel_j, orbital_map = resolution
+        print(
+            f"atom I: {sel_i.symbol} #{sel_i.atom_index}, {sel_i.selector} -> "
+            f"{len(sel_i.indices)} NAOs"
+        )
+        print(
+            f"atom J: {sel_j.symbol} #{sel_j.atom_index}, {sel_j.selector} -> "
+            f"{len(sel_j.indices)} NAOs"
+        )
+        print(f"orbital map: {len(orbital_map.atoms)} atoms, {orbital_map.total_orbitals} NAOs")
+    print(f"E_Fermi = {metadata['efermi_ev']:.6f} eV")
+    print(f"ICOHP = {metadata['icohp_raw_ev']:.6f} eV")
+    print(f"-ICOHP = {metadata['minus_icohp_ev']:.6f} eV")
+    print(f"raw COHP: {metadata['files']['raw']}")
+    print(f"E-E_Fermi COHP: {metadata['files']['shifted']}")
+    print(f"ICOHP summary: {metadata['files']['icohp']}")
+    if metadata["files"]["plot"]:
+        print(f"plot: {metadata['files']['plot']}")
+    else:
+        print("plot: skipped because matplotlib is not installed")
+    print(f"metadata: {metadata['files']['metadata']}")
+
+
+def interactive_fix_stru_range() -> None:
+    print("\n[5] Fix STRU atoms by coordinate range\n")
+    stru = Path("STRU")
+    if not stru.is_file():
+        die("cannot find STRU in current directory")
+    axis = prompt_choice("Coordinate axis", ["z", "x", "y"], "z")
+    range_text = prompt_text(f"{axis} coordinate range a-b", "0-0")
+    lower, upper = parse_coordinate_range(range_text)
+    args = argparse.Namespace(stru=stru, out=None, axis=axis, min=lower, max=upper, no_backup=False)
+    cmd_fix_stru_range(args)
+    print("STRU coordinate-range fixing finished. Exiting abacuskit.")
+    raise ProgramExit
+
+
+def interactive_rotate_vacuum_z_to_y() -> None:
+    print("\n[6] Rotate STRU vacuum direction from Z to Y\n")
+    stru = Path("STRU")
+    if not stru.is_file():
+        die("cannot find STRU in current directory")
+    args = argparse.Namespace(stru=stru, out=None, no_backup=False)
+    cmd_rotate_vacuum_z_to_y(args)
+    print("STRU vacuum-direction rotation finished. Exiting abacuskit.")
+    raise ProgramExit
+
+
+def interactive_stru2cif() -> None:
+    print("\n[7] Convert STRU to CIF\n")
+    stru = Path("STRU")
+    if not stru.is_file():
+        die("cannot find STRU in current directory")
+    args = argparse.Namespace(stru=stru, out=Path("STRU.cif"))
+    cmd_stru2cif(args)
+    print("STRU -> CIF conversion finished. Exiting abacuskit.")
+    raise ProgramExit
 
 
 def print_interactive_menu() -> None:
@@ -2847,19 +3935,30 @@ Author: {__author__}
 Affiliation: {__affiliation__}
 
   1) CIF -> ABACUS STRU
-  2) Make candidate CIFs
-  3) Generate ABACUS INPUT
-  4) Prepare ABACUS jobs
-  5) Check ABACUS job status
-  6) Plot DOS / PDOS / LDOS
-  7) Collect ABACUS outputs to DeepMD data
-  8) Make DeepMD training input
-  9) Init workflow skeleton
-  10) Generate ABACUS KPT
-  11) Prepare convergence-test jobs
-  12) Collect ABACUS metrics / report
-  13) Create ABACUS launch scripts
-  14) Plot ELF / charge density / charge-density difference
+  2) Generate ABACUS INPUT
+  3) Generate ABACUS KPT
+  4) Check ABACUS job status
+  5) Fix STRU atoms by coordinate range
+  6) Rotate STRU vacuum direction Z -> Y
+  7) Convert STRU to CIF
+
+  8) Plot charge density
+  9) Plot charge-density difference
+  10) Plot ELF
+  11) Plot DOS / PDOS / LDOS
+  12) Auto plot BAND for current directory
+  13) ABACUS LCAO COHP
+
+  14) Prepare ABACUS jobs
+  15) Make candidate CIFs
+  16) Prepare convergence-test jobs
+  17) Collect ABACUS metrics / report
+  18) Create ABACUS launch scripts
+  19) Collect ABACUS outputs to DeepMD data
+  20) Make DeepMD training input
+  21) Init workflow skeleton
+
+  22) Search/save APNS pseudopotential and orbital paths
   h) Show command-line help
   q) Quit abacuskit
   0) Exit
@@ -2870,19 +3969,27 @@ Affiliation: {__affiliation__}
 def interactive_menu() -> None:
     actions = {
         "1": interactive_cif2stru,
-        "2": interactive_make_candidates,
-        "3": interactive_input_template,
-        "4": interactive_prepare_abacus,
-        "5": interactive_check_abacus,
-        "6": interactive_plot_dos,
-        "7": interactive_collect_deepmd,
-        "8": interactive_make_train,
-        "9": interactive_init_workflow,
-        "10": interactive_kpt,
-        "11": interactive_conv_test,
-        "12": interactive_collect_report,
-        "13": interactive_launch_script,
-        "14": interactive_plot_grid,
+        "2": interactive_input_template,
+        "3": interactive_kpt,
+        "4": interactive_check_abacus,
+        "5": interactive_fix_stru_range,
+        "6": interactive_rotate_vacuum_z_to_y,
+        "7": interactive_stru2cif,
+        "8": interactive_plot_charge,
+        "9": interactive_plot_charge_diff,
+        "10": interactive_plot_elf,
+        "11": interactive_plot_dos,
+        "12": interactive_plot_band,
+        "13": interactive_cohp,
+        "14": interactive_prepare_abacus,
+        "15": interactive_make_candidates,
+        "16": interactive_conv_test,
+        "17": interactive_collect_report,
+        "18": interactive_launch_script,
+        "19": interactive_collect_deepmd,
+        "20": interactive_make_train,
+        "21": interactive_init_workflow,
+        "22": interactive_config_apns_paths,
     }
     while True:
         print_interactive_menu()
@@ -2961,6 +4068,26 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_structure_args(p)
     p.set_defaults(func=cmd_cif2stru)
 
+    p = sub.add_parser("fix-stru-range", help="fix STRU atoms whose coordinate falls in an axis range")
+    p.add_argument("stru", type=Path, nargs="?", default=Path("STRU"))
+    p.add_argument("--axis", choices=["x", "y", "z"], required=True)
+    p.add_argument("--min", type=float, required=True)
+    p.add_argument("--max", type=float, required=True)
+    p.add_argument("--out", type=Path, help="output STRU; default overwrites input and writes a .bak backup")
+    p.add_argument("--no-backup", action="store_true", help="do not write backup when overwriting input")
+    p.set_defaults(func=cmd_fix_stru_range)
+
+    p = sub.add_parser("rotate-vacuum-z-to-y", help="rotate STRU so the Z vacuum direction becomes Y")
+    p.add_argument("stru", type=Path, nargs="?", default=Path("STRU"))
+    p.add_argument("--out", type=Path, help="output STRU; default overwrites input and writes a .bak backup")
+    p.add_argument("--no-backup", action="store_true", help="do not write backup when overwriting input")
+    p.set_defaults(func=cmd_rotate_vacuum_z_to_y)
+
+    p = sub.add_parser("stru2cif", help="convert an ABACUS STRU file to CIF")
+    p.add_argument("stru", type=Path, nargs="?", default=Path("STRU"))
+    p.add_argument("-o", "--out", type=Path, default=Path("STRU.cif"))
+    p.set_defaults(func=cmd_stru2cif)
+
     p = sub.add_parser("make-candidates", help="make randomly displaced/strained CIFs")
     p.add_argument("cif", type=Path)
     p.add_argument("--out", type=Path, required=True)
@@ -3022,6 +4149,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", type=Path, default=Path("KPT"))
     p.set_defaults(func=cmd_kpt)
 
+    p = sub.add_parser("kpt-path", help="write a VASPKIT-like high-symmetry line-mode KPT using SeeK-path")
+    p.add_argument("structure", type=Path, help="structure file readable by ASE, e.g. STRU, CIF, or POSCAR")
+    p.add_argument("--out", type=Path, default=Path("KPT"))
+    p.add_argument("--high-symmetry-points", type=Path, default=Path("HIGH_SYMMETRY_POINTS"))
+    p.add_argument("--points-per-segment", type=int, default=20)
+    p.add_argument("--symprec", type=float, default=1.0e-5)
+    p.add_argument("--angle-tolerance", type=float, default=-1.0)
+    p.add_argument("--threshold", type=float, default=1.0e-7)
+    p.add_argument("--no-time-reversal", action="store_true")
+    p.set_defaults(func=cmd_kpt_path)
+
     p = sub.add_parser("check-abacus", help="check whether ABACUS jobs finished and converged")
     p.add_argument("jobs", type=Path, nargs="+")
     p.add_argument("--json", type=Path, help="write full JSON report")
@@ -3071,6 +4209,49 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fermi", type=float, help="shift energy by this Fermi energy in eV")
     p.add_argument("--out", type=Path, required=True)
     p.set_defaults(func=cmd_plot_dos)
+
+    p = sub.add_parser("plot-band", help="plot ABACUS BANDS_*.dat and shift Fermi level to 0 eV")
+    p.add_argument("path", type=Path, help="ABACUS job directory, OUT.* directory, or BANDS_*.dat file")
+    p.add_argument("--file", type=Path, help="explicit BANDS_*.dat file")
+    p.add_argument("--kpt", type=Path, help="explicit line-mode KPT file for high-symmetry labels")
+    p.add_argument("--fermi", type=float, help="explicit Fermi energy in eV; default reads running_*.log")
+    p.add_argument("--out", type=Path, default=Path("band.png"))
+    p.add_argument("--emin", type=float, default=-12.0, help="minimum plotted energy after Fermi shift")
+    p.add_argument("--emax", type=float, default=8.0, help="maximum plotted energy after Fermi shift")
+    p.add_argument("--title", help="plot title")
+    p.add_argument("--linewidth", type=float, default=0.8)
+    p.add_argument("--color", default="C0")
+    p.add_argument("--dpi", type=int, default=300)
+    p.set_defaults(func=cmd_plot_band)
+
+    p = sub.add_parser("cohp-orbitals", help="list atom shell channels and global NAO ranges for COHP")
+    p.add_argument("out_dir", type=Path, nargs="?", default=Path("OUT.ABACUS"))
+    p.add_argument("--stru", type=Path, help="ABACUS STRU path; default searches beside OUT.*")
+    p.add_argument("--input", type=Path, help="ABACUS INPUT path; default searches beside OUT.*")
+    p.add_argument("--orbital-dir", type=Path, help="directory containing ABACUS numerical orbital files")
+    p.set_defaults(func=cmd_cohp_orbitals)
+
+    p = sub.add_parser("cohp", help="calculate built-in ABACUS LCAO COHP/COOP from OUT.* outputs")
+    p.add_argument("out_dir", type=Path, nargs="?", default=Path("OUT.ABACUS"))
+    p.add_argument("--atom-i-orbs", required=True, help="global NAO indices, or shell selector with --atom-i-index")
+    p.add_argument("--atom-j-orbs", required=True, help="global NAO indices, or shell selector with --atom-j-index")
+    p.add_argument("--atom-i-index", type=int, help="1-based atom index for atom/group I")
+    p.add_argument("--atom-j-index", type=int, help="1-based atom index for atom/group J")
+    p.add_argument("--stru", type=Path, help="ABACUS STRU path for atom-index shell selection")
+    p.add_argument("--input", type=Path, help="ABACUS INPUT path for orbital_dir discovery")
+    p.add_argument("--orbital-dir", type=Path, help="directory containing ABACUS numerical orbital files")
+    p.add_argument("--method", choices=["COHP", "COOP"], default="COHP")
+    p.add_argument("--spin", choices=["sum", "up", "down"], default="sum")
+    p.add_argument("--de", type=float, default=0.05)
+    p.add_argument("--no-smooth", action="store_true")
+    p.add_argument("--smooth-nstddev", type=float, default=4.0)
+    p.add_argument("--emin", type=float, default=-10.0)
+    p.add_argument("--emax", type=float, default=10.0)
+    p.add_argument("--width", type=float)
+    p.add_argument("--invert", action="store_true", default=True, help="plot -COHP/-COOP convention")
+    p.add_argument("--no-invert", action="store_false", dest="invert", help="plot raw COHP/COOP sign")
+    p.add_argument("--output-prefix", type=Path, default=Path("COHP"))
+    p.set_defaults(func=cmd_cohp)
 
     p = sub.add_parser("plot-grid", help="plot ELF/charge-density cube files or charge-density differences")
     p.add_argument("path", type=Path, help="ABACUS job directory, OUT.* directory, or cube file")

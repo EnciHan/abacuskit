@@ -4,18 +4,30 @@
 
 `abacuskit` 是一个集成式 ABACUS + DeepMD 命令行程序，用于生成 ABACUS 输入文件、准备批量任务、检查/汇总计算结果，并把 ABACUS 输出转换为 DeepMD 数据。
 
-- Version: v1.1.1
+- Version: v1.2
 - Author: Han Enci, Zhong Lisheng, Yu Yutong, Xu Mengting, Chen Jingyuan
 - Affiliation: Xi'an University of Technology
+
+## v1.2 更新记录
+
+- 新增 `301` / `302` KPT 生成入口：支持从当前目录自动识别 `STRU`、`POSCAR`、`CONTCAR` 或 CIF，生成普通 Gamma mesh KPT，或用 SeeK-path/HPKOT 生成能带高对称路径 KPT。
+- 新增 BAND 自动后处理：读取 `BANDS_*.dat`、line-mode `KPT` 和 Fermi 能，输出 `band.png`，并报告带隙、VBM/CBM 与直接/间接带隙。
+- 新增 STRU 结构工具：按坐标范围固定原子、将 Z 真空方向转换为 Y 真空方向、将 STRU 转 CIF，并修复 STRU 转 CIF 时晶胞方向被 ASE 规范化导致真空方向看起来未改变的问题。
+- 新增 APNS 赝势和轨道库路径自动搜索与保存功能，搜索结果写入 `~/.abacuskit/config.json`，后续生成输入时自动使用。
+- 新增内置 ABACUS LCAO COHP/COOP 后处理：读取 `data-*-H`、`data-*-S`、`WFC_NAO_K*.txt`、`kpoints` 和 `running_scf.log`，支持 atom index + shell 或全局 NAO index 选择，输出 `.dat`、`_EminusEf.dat`、`.png`、`.json`。
+- 新增 ICOHP 输出：对 COHP/COOP 曲线积分到 `E_Fermi`，同时给出原始 `ICOHP` 和反号约定的 `-ICOHP`，并写入 `.icohp.txt` 与 metadata。
+- 重新整理交互菜单：`1-7` 为输入/结构工具，`8-13` 为后处理，`14-22` 为批量任务和工作流。
+- 新增依赖 `seekpath` 和 `spglib`，用于高对称路径生成。
 
 ## v1.1.1 更新记录
 
 - 修复 `cell-relax` / relax 任务中前面步骤出现 `not converged`、但最终日志显示 `Relaxation is converged!` 时被误判为未收敛的问题。
 - 多个 `running_*.log` 存在时，优先检查最新日志。
+- 重新整理交互菜单分类：输入/任务、后处理、批量/工作流分组显示，并新增后处理里的 COHP 矩阵输出 INPUT 生成入口。
 
 ## v1.1 更新记录
 
-- 简化交互菜单 5 号功能：输入 `5` 后直接检查当前目录下的 ABACUS 任务状态并自动退出。
+- 简化 ABACUS 状态检查入口：选择后直接检查当前目录下的 ABACUS 任务状态并自动退出。
 - 增强 ABACUS 输出识别：可自动识别当前目录、`OUT.<suffix>` 输出目录，或当前目录下的多个任务子目录。
 - 检查结果新增任务类型和输出目录显示，并报告是否结束、是否收敛、是否失败和收敛后的最终能量。
 - 增加 ELF、电荷密度和电荷密度差 cube 文件绘图功能，并补充对应 INPUT 模板选项。
@@ -39,7 +51,7 @@ pip install .
 可选功能依赖：
 
 ```bash
-pip install "abacuskit[plot]"      # DOS/PDOS/LDOS 绘图
+pip install "abacuskit[plot]"      # BAND/DOS/PDOS/LDOS/ELF/电荷密度绘图
 pip install "abacuskit[deepmd]"    # collect-deepmd 数据转换
 ```
 
@@ -58,14 +70,34 @@ abacuskit
 
 启动后会先显示终端版 `abacuskit` ASCII logo，再进入数字菜单。
 
-新增的本地测试/汇总入口：
+顶层菜单按“输入/任务、后处理、批量/工作流”分类：
 
 ```text
-10   Generate ABACUS KPT
-11   Prepare convergence-test jobs
-12   Collect ABACUS metrics / report
-13   Create ABACUS launch scripts
-14   Plot ELF / charge density / charge-density difference
+1    CIF -> ABACUS STRU
+2    Generate ABACUS INPUT
+3    Generate ABACUS KPT
+4    Check ABACUS job status
+5    Fix STRU atoms by coordinate range
+6    Rotate STRU vacuum direction Z -> Y
+7    Convert STRU to CIF
+
+8    Plot charge density
+9    Plot charge-density difference
+10   Plot ELF
+11   Plot DOS / PDOS / LDOS
+12   Auto plot BAND for current directory
+13   ABACUS LCAO COHP
+
+14   Prepare ABACUS jobs
+15   Make candidate CIFs
+16   Prepare convergence-test jobs
+17   Collect ABACUS metrics / report
+18   Create ABACUS launch scripts
+19   Collect ABACUS outputs to DeepMD data
+20   Make DeepMD training input
+21   Init workflow skeleton
+
+22   Search/save APNS pseudopotential and orbital paths
 ```
 
 常用的 CIF 转 STRU 菜单流程：
@@ -103,19 +135,19 @@ q    Quit abacuskit
 常用的 ABACUS 输出检查菜单流程：
 
 ```text
-5    Check ABACUS job status
+4    Check ABACUS job status
 ```
 
-输入 `5` 后会直接检查当前目录 `.`。如果当前目录本身是 ABACUS 任务目录、`OUT.<suffix>` 输出目录，或当前目录下包含多个 ABACUS 任务目录，程序会自动识别。检查完成后会输出自动识别到的任务类型、输出目录、是否结束、是否收敛、是否失败，以及收敛后的最终能量，随后自动退出程序。
+输入 `4` 后会直接检查当前目录 `.`。如果当前目录本身是 ABACUS 任务目录、`OUT.<suffix>` 输出目录，或当前目录下包含多个 ABACUS 任务目录，程序会自动识别。检查完成后会输出自动识别到的任务类型、输出目录、是否结束、是否收敛、是否失败，以及收敛后的最终能量，随后自动退出程序。
 
 常用的 INPUT 生成菜单流程：
 
 ```text
-3    Generate ABACUS INPUT
+2    Generate ABACUS INPUT
 301  Generate INPUT now using current settings
 ```
 
-输入 `3` 后进入 `30x` 二级菜单。默认设置是 scf、efficiency LCAO 基组、gpu、cusolver、`kspacing=0.14`、`ecutwfc=100`、`nspin=1`、输出 `INPUT`。输入 `301` 会按当前设置生成 `INPUT`，成功后自动退出程序。
+输入 `2` 后进入 `30x` 二级菜单。默认设置是 scf、efficiency LCAO 基组、gpu、cusolver、`kspacing=0.14`、`ecutwfc=100`、`nspin=1`、输出 `INPUT`。输入 `301` 会按当前设置生成 `INPUT`，成功后自动退出程序。
 
 常用 `30x` 编号：
 
@@ -143,7 +175,7 @@ q    Quit abacuskit
 321  Apply DOS target template
 322  Apply PDOS target template
 323  Apply band structure target template
-324  Apply COHP matrix-output template
+324  Apply COHP output template
 325  Apply work-function/potential template
 326  Enable/edit DFT+U
 327  Apply DFT+U convergence-aid template
@@ -161,7 +193,7 @@ q    Quit abacuskit
 - `320` 会写入 `efield_flag true`、`dip_cor_flag true`、`efield_dir 2`、`efield_amp 0`，默认 Z 方向偶极修正。
 - `321` / `322` 会切到 `nscf` 并设置 `init_chg=file`、`read_file_dir=./`、`out_dos` 等参数；需要先有 SCF 电荷密度并准备较密 KPT。
 - `323` 会切到 `nscf` 并设置 `out_band=1`、`out_proj_band=1`；需要自己准备 line-mode `KPT`。
-- `324` 会打开 `out_mat_hs2/out_mat_hs`，作为 COHP 后处理所需 H/S 矩阵输出模板。
+- `324` 会切到 LCAO SCF，并写入 `out_mat_hs="1 8"`、`out_wfc_lcao=1`、`out_app_flag=1`，作为内置 COHP/COOP 后处理所需输出模板。
 - `325` 会打开 `out_pot=2` 和 Z 方向偶极修正，作为 slab 功函数/静电势模板。
 - `330` 会写入 `out_elf="1 3"`，让 ABACUS 在 `OUT.<suffix>` 输出 ELF cube。
 - `331` 会写入 `out_chg="1 3"`，让 ABACUS 在 `OUT.<suffix>` 输出电荷密度 cube。
@@ -171,7 +203,17 @@ q    Quit abacuskit
 
 ## 路径配置
 
-`abacuskit` 不会自带 ABACUS、赝势库、轨道库或 DeepMD-kit。请用命令行参数传入路径，或设置下面的环境变量作为默认值：
+`abacuskit` 不会自带 ABACUS 或 DeepMD-kit。APNS 赝势和轨道库会优先自动搜索下面三个目录名，因此常规安装后一般不用再手动 `export`：
+
+```text
+apns-pseudopotentials-v1
+apns-orbitals-efficiency-v1
+apns-orbitals-precision-v1
+```
+
+自动搜索会检查当前目录、用户目录下常见的 `data/abacus-lib`、`apps` 等位置，也可以用 `ABACUSKIT_APNS_ROOT` 或 `ABACUSKIT_APNS_SEARCH_ROOTS` 指定搜索根目录。显式环境变量仍然优先级最高，适合机器上有多个库版本或需要指定自定义路径时使用：
+
+在交互菜单中输入 `22`，程序会自动扫描这三个路径并直接写入 `~/.abacuskit/config.json`，后续运行 `abacuskit` 会自动读取这个配置，不需要再手动 `export`。
 
 ```bash
 export ABACUSKIT_PSEUDO_DIR=/path/to/pseudopotentials
@@ -183,7 +225,7 @@ export ABACUSKIT_DEEPMD_PYTHON=/path/to/deepmd/python
 export ABACUSKIT_DP=/path/to/dp
 ```
 
-也可以在每次运行时显式指定，例如 `--pseudo-dir`、`--orbital-dir`、`--abacus-env`、`--python`。
+也可以在每次运行时显式指定，例如 `--pseudo-dir`、`--orbital-dir`、`--abacus-env`、`--python`。命令行参数优先于自动发现结果。
 
 ## 1. CIF 转 ABACUS STRU
 
@@ -210,6 +252,33 @@ abacuskit cif2stru /path/to/structure.cif -o STRU
 ```
 
 固定原子规则里，`x/y/z` 表示要固定的方向；生成到 STRU 后对应方向的 move flag 会写成 `0`，未固定方向保持 `1`。
+
+如果已经有 `STRU`，也可以按坐标范围把某一层或某一区间内的原子 xyz 三个方向全部固定。例如固定 `z=0` 到 `z=2.0` Angstrom 范围内的原子：
+
+```bash
+abacuskit fix-stru-range STRU \
+  --axis z \
+  --min 0 \
+  --max 2.0
+```
+
+默认会原地覆盖 `STRU`，并先备份为 `STRU.bak`。交互菜单里输入 `5`，再输入坐标轴和 `a-b` 范围也可以完成，例如先输入 `z`，再输入 `2-3`。
+
+如果 slab 真空层当前在 Z 方向，需要像 `abacustest` 那样转到 Y 方向，可以使用：
+
+```bash
+abacuskit rotate-vacuum-z-to-y STRU
+```
+
+默认会交换 `y/z` 方向的晶胞矢量分量、Cartesian 原子坐标和移动标记，使原来的 Z 真空方向变成 Y 方向；原地覆盖前会备份为 `STRU.bak`。交互菜单里输入 `6` 可直接对当前目录 `STRU` 执行。
+
+已有 `STRU` 也可以直接转回 CIF：
+
+```bash
+abacuskit stru2cif STRU -o STRU.cif
+```
+
+交互菜单里输入 `7` 会读取当前目录 `STRU` 并输出 `STRU.cif`。
 
 ## 2. 从一个 CIF 生成一批待标注结构
 
@@ -333,11 +402,11 @@ numactl --physcpubind=0-11 --membind=0 mpirun -np 1 --bind-to none abacus
 abacuskit abacus-versions
 ```
 
-菜单里输入 `13` 可以交互式创建启动脚本。
+菜单里输入 `18` 可以交互式创建启动脚本。
 
 ## 6. 生成 KPT
 
-参考 `abacustest prepare` 里的 KPT 写法，`abacuskit` 现在可以直接生成 ABACUS 的 Gamma/MP 网格 KPT：
+参考 `abacustest prepare` 里的 KPT 写法，`abacuskit` 可以直接生成 ABACUS 的 Gamma 网格 KPT。交互菜单里输入 `3 -> 301` 会自动读取当前目录的 `STRU` / `POSCAR` / `CONTCAR` / `*.cif`，按 `kspacing=0.14` 自动计算网格，使用 Gamma 类型、无偏移，直接写出 `KPT`。
 
 ```bash
 abacuskit kpt \
@@ -347,7 +416,16 @@ abacuskit kpt \
   --out KPT
 ```
 
-菜单里输入 `10` 也可以交互式生成。
+也可以用 SeeK-path/HPKOT 方法从晶体结构自动寻找高对称点并生成 line-mode `KPT`，流程与 VASPKIT 3D 高对称路径生成的思路一致。交互菜单里输入 `3 -> 302` 会自动读取当前目录结构，使用默认插值点数直接写出 `KPT` 和 `HIGH_SYMMETRY_POINTS`。
+
+```bash
+abacuskit kpt-path STRU \
+  --out KPT \
+  --high-symmetry-points HIGH_SYMMETRY_POINTS \
+  --points-per-segment 20
+```
+
+`kpt-path` 会同时写出 `HIGH_SYMMETRY_POINTS`，方便检查高对称点分数坐标。菜单里输入 `3` 后会进入 KPT `30x` 二级菜单：`301` 一键生成普通计算用 Gamma 网格，`302` 一键生成能带计算用 SeeK-path 高对称路径 KPT。
 
 ## 7. 准备收敛测试任务
 
@@ -412,9 +490,23 @@ abacuskit report-metrics \
   --out abacuskit_report.html
 ```
 
-菜单里输入 `12` 会先收集 metrics，再询问是否生成 HTML 报告。
+菜单里输入 `17` 会先收集 metrics，再询问是否生成 HTML 报告。
 
-## 10. 绘制 DOS / PDOS / LDOS
+## 10. 绘制 BAND / DOS / PDOS / LDOS
+
+ABACUS 的能带文件通常是 `OUT.<suffix>/BANDS_1.dat`。`abacuskit` 会自动读取 `running_*.log` 里的 `EFERMI` / `E_Fermi`，将费米能级平移到 0 eV，并尽量从 line-mode `KPT` 自动生成高对称点标签。默认绘图区间是 `-12` 到 `8` eV，以保留费米能级附近细节；出图后会直接输出带隙值，并判断直接带隙或间接带隙。
+
+```bash
+abacuskit plot-band band \
+  --out band.png
+
+abacuskit plot-band OUT.ABACUS \
+  --out band.png \
+  --emin -12 \
+  --emax 8
+```
+
+在交互菜单中，如果当前目录就是 band 任务目录，直接输入 `12` 会自动生成 `band.png`、输出带隙信息并退出。
 
 ABACUS 的 DOS 文件通常是 `DOS1_smearing.dat`；LCAO 且 `out_dos 2` 会同时生成 `PDOS` 文件。PDOS 选择器写法是 `元素=轨道`，轨道支持 `s/p/d/f/g`。
 
@@ -436,11 +528,11 @@ abacuskit plot-dos OUT.ABACUS \
   --out ldos.png
 ```
 
-LDOS 支持 ABACUS 的 `LDOS.txt` 线扫描文件；如果输出的是 `LDOS_*eV.cube`，脚本会自动画 cube 中间切片。
+LDOS 支持 ABACUS 的 `LDOS.txt` 线扫描文件；如果输出的是 `LDOS_*eV.cube`，脚本会自动画 cube 中间切片。菜单里输入 `11` 可以交互式绘制 DOS、PDOS 或 LDOS。
 
 ## 11. 绘制 ELF / 电荷密度 / 电荷密度差
 
-先用 `3 -> 330` 或 `3 -> 331` 生成包含 `out_elf 1 3` / `out_chg 1 3` 的 `INPUT`，运行 ABACUS 后会在 `OUT.<suffix>` 下得到 cube 文件。
+先用 `2 -> 330` 或 `2 -> 331` 生成包含 `out_elf 1 3` / `out_chg 1 3` 的 `INPUT`，运行 ABACUS 后会在 `OUT.<suffix>` 下得到 cube 文件。
 
 绘制 ELF 或电荷密度 cube 的中间切片：
 
@@ -466,7 +558,43 @@ abacuskit plot-grid adsorbed/OUT.ABACUS \
 
 默认画 `z` 方向中间切片；可用 `--axis x|y|z` 和 `--index N` 指定切片。
 
-## 12. ABACUS 输出转 DeepMD 数据
+菜单里输入 `8` 会在当前目录自动绘制电荷密度并生成 `charge.png`；输入 `9` 会提示输入被减去的任务或输出目录，然后生成 `charge_diff.png` 和可选的 `charge_diff.cube`；输入 `10` 会在当前目录自动绘制 ELF 并生成 `elf.png`。
+
+## 12. ABACUS LCAO COHP 后处理
+
+COHP/COOP 后处理需要先用 LCAO SCF 输出 H/S 矩阵和 NAO 波函数。菜单里输入 `13` 会进入 COHP 子菜单：
+
+```text
+131  Generate COHP-ready SCF INPUT
+132  List atom orbital channels / global NAO ranges
+133  Calculate COHP/COOP from OUT.ABACUS
+```
+
+`131` 默认生成带 `basis_type lcao`、`out_mat_hs 1 8`、`out_wfc_lcao 1`、`out_app_flag 1` 的 `INPUT.cohp`。用这个 INPUT 跑完 ABACUS 后，`132` 可以根据 `STRU`、`INPUT` 和数值轨道文件列出每个原子的全局 NAO 范围；`133` 会从 `OUT.ABACUS` 读取 `data-*-H`、`data-*-S`、`WFC_NAO_K*.txt`、`kpoints` 和 `running_scf.log`，生成 COHP/COOP 的 `.dat`、`_EminusEf.dat`、`.icohp.txt`、`.json` 和 `.png`。
+
+`.icohp.txt` 会给出从能量下限积分到 `E_Fermi` 的原始 `ICOHP`，以及按默认画图反号约定输出的 `-ICOHP`。
+
+命令行示例：
+
+```bash
+abacuskit cohp-orbitals OUT.ABACUS --stru STRU --input INPUT
+abacuskit cohp OUT.ABACUS \
+  --atom-i-index 95 --atom-i-orbs 3d \
+  --atom-j-index 98 --atom-j-orbs 2p \
+  --method COHP \
+  --output-prefix Ni95_O98_COHP
+```
+
+也可以直接用全局 NAO 索引：
+
+```bash
+abacuskit cohp OUT.ABACUS \
+  --atom-i-orbs 0,1,2 \
+  --atom-j-orbs 100,101 \
+  --output-prefix pair_COHP
+```
+
+## 13. ABACUS 输出转 DeepMD 数据
 
 ```bash
 abacuskit collect-deepmd 02_abacus_sp \
@@ -482,7 +610,7 @@ abacuskit collect-deepmd 02_abacus_sp \
 
 转换报告写入 `03_deepmd_data/collect_report.json`。
 
-## 12. 生成 DeepMD 训练输入并训练
+## 14. 生成 DeepMD 训练输入并训练
 
 ```bash
 abacuskit make-train 03_deepmd_data/train/* \
