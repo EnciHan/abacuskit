@@ -4,9 +4,17 @@
 
 `abacuskit` 是一个集成式 ABACUS + DeepMD 命令行程序，用于生成 ABACUS 输入文件、准备批量任务、检查/汇总计算结果，并把 ABACUS 输出转换为 DeepMD 数据。
 
-- Version: v1.2
+- Version: v1.2.1
 - Author: Han Enci, Zhong Lisheng, Yu Yutong, Xu Mengting, Chen Jingyuan
 - Affiliation: Xi'an University of Technology
+
+## v1.2.1 更新记录
+
+- 修复交互菜单二级编号错位：`2` 进入 INPUT 菜单后使用 `20x`，避免与 KPT 的 `30x` 冲突。
+- 修复 BAND/DOS 模板：`nscf` 输入不再写 `kspacing`，避免 ABACUS 覆盖 line-mode KPT。
+- BAND/DOS 模板自动使用 precision LCAO 基组，并同步当前目录 `STRU` 的 `NUMERICAL_ORBITAL`。
+- 增强后处理兼容性：BAND 绘图支持 `band.txt`，DOS 绘图支持 `TDOS.dat`。
+- 增强 ABACUS 状态检查：识别 `#SCF IS CONVERGED#` 收敛标记。
 
 ## v1.2 更新记录
 
@@ -191,8 +199,8 @@ q    Quit abacuskit
 
 - `219` 会写入 `vdw_method`，可选 `d3_bj`、`d3_0`、`d2` 或关闭。
 - `220` 会写入 `efield_flag true`、`dip_cor_flag true`、`efield_dir 2`、`efield_amp 0`，默认 Z 方向偶极修正。
-- `221` / `222` 会切到 `nscf` 并设置 `init_chg=file`、`read_file_dir=./`、`out_dos` 等参数，同时不写 `kspacing`；需要先有 SCF 电荷密度并准备较密 KPT。
-- `223` 会切到 `nscf` 并设置 `out_band=1`、`out_proj_band=1`，同时不写 `kspacing`；需要自己准备 line-mode `KPT`，避免 ABACUS 按 `kspacing` 自动生成网格并覆盖高对称路径。
+- `221` / `222` 会切到 `nscf` 并设置 `init_chg=file`、`read_file_dir=./`、`out_dos` 等参数，同时不写 `kspacing`；生成 INPUT 时会自动使用 precision LCAO `orbital_dir`，并把当前目录 `STRU` 的 `NUMERICAL_ORBITAL` 同步成 precision 轨道文件。需要先有 SCF 电荷密度并准备较密 KPT。
+- `223` 会切到 `nscf` 并设置 `out_band=1`、`out_proj_band=1`，同时不写 `kspacing`；生成 INPUT 时会自动使用 precision LCAO `orbital_dir`，并把当前目录 `STRU` 的 `NUMERICAL_ORBITAL` 同步成 precision 轨道文件。需要自己准备 line-mode `KPT`，避免 ABACUS 按 `kspacing` 自动生成网格并覆盖高对称路径。
 - `224` 会切到 LCAO SCF，并写入 `out_mat_hs="1 8"`、`out_wfc_lcao=1`、`out_app_flag=1`，作为内置 COHP/COOP 后处理所需输出模板。
 - `225` 会打开 `out_pot=2` 和 Z 方向偶极修正，作为 slab 功函数/静电势模板。
 - `230` 会写入 `out_elf="1 3"`，让 ABACUS 在 `OUT.<suffix>` 输出 ELF cube。

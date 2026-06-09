@@ -203,6 +203,7 @@ DFTU_KEYS = (
     "onsite_radius",
 )
 DFTU_MIXING_KEYS = ("mixing_restart", "mixing_dmr", "uramping")
+PRECISION_TARGET_KEYS = {"out_band", "out_proj_band", "out_dos"}
 TERMINAL_LOGO = [
     r"  ___   ____    ___    ____  _   _  ____  _  __  ___  _____ ",
     r" / _ \ | __ )  / _ \  / ___|| | | |/ ___|| |/ / |_ _||_   _|",
@@ -380,6 +381,90 @@ def choose_library_files(
     if missing:
         die("missing library files: " + ", ".join(missing))
     return pseudos, orbitals
+
+
+def choose_orbitals_for_symbols(symbols: Iterable[str], orbital_dir: Path) -> dict[str, Path]:
+    orbital_index = index_library(orbital_dir, (".orb",))
+    orbitals: dict[str, Path] = {}
+    missing = []
+    for sym in symbols:
+        candidates = [p for p in orbital_index.get(sym, []) if p.name.startswith(f"{sym}_")]
+        if not candidates:
+            missing.append(f"orbital for {sym} in {orbital_dir}")
+        else:
+            orbitals[sym] = sorted(candidates, key=lambda p: score_orbital(p, sym))[0]
+    if missing:
+        die("missing library files: " + ", ".join(missing))
+    return orbitals
+
+
+def read_stru_species_symbols(stru: Path) -> list[str]:
+    lines = stru.read_text(errors="ignore").splitlines()
+    symbols: list[str] = []
+    in_species = False
+    for raw in lines:
+        body = raw.split("#", 1)[0].strip()
+        if not body:
+            continue
+        key = body.upper()
+        if key == "ATOMIC_SPECIES":
+            in_species = True
+            continue
+        if in_species and key in {
+            "NUMERICAL_ORBITAL",
+            "LATTICE_CONSTANT",
+            "LATTICE_VECTORS",
+            "ATOMIC_POSITIONS",
+        }:
+            break
+        if in_species:
+            symbols.append(body.split()[0])
+    return symbols
+
+
+def sync_stru_orbitals(stru: Path, orbital_dir: Path, backup: bool = True) -> bool:
+    if not stru.is_file():
+        return False
+    lines = stru.read_text(errors="ignore").splitlines()
+    symbols = read_stru_species_symbols(stru)
+    if not symbols:
+        return False
+    orbitals = choose_orbitals_for_symbols(symbols, orbital_dir)
+    start = None
+    for idx, raw in enumerate(lines):
+        if raw.split("#", 1)[0].strip().upper() == "NUMERICAL_ORBITAL":
+            start = idx
+            break
+    new_orbital_lines = [orbitals[sym].name for sym in symbols]
+    if start is None:
+        insert = None
+        for idx, raw in enumerate(lines):
+            if raw.split("#", 1)[0].strip().upper() == "LATTICE_CONSTANT":
+                insert = idx
+                break
+        if insert is None:
+            die(f"cannot find insertion point for NUMERICAL_ORBITAL in {stru}")
+        lines[insert:insert] = ["", "NUMERICAL_ORBITAL", *new_orbital_lines]
+    else:
+        line_idx = start + 1
+        replaced = 0
+        while line_idx < len(lines) and replaced < len(symbols):
+            body = lines[line_idx].split("#", 1)[0].strip()
+            if body:
+                lines[line_idx] = new_orbital_lines[replaced]
+                replaced += 1
+            line_idx += 1
+        if replaced < len(symbols):
+            lines[start + 1 : line_idx] = new_orbital_lines
+    new_text = "\n".join(lines) + "\n"
+    old_text = stru.read_text(errors="ignore")
+    if new_text == old_text:
+        return False
+    if backup:
+        backup_path = stru.with_suffix(stru.suffix + ".orbital.bak") if stru.suffix else stru.with_name(stru.name + ".orbital.bak")
+        backup_path.write_text(old_text)
+    stru.write_text(new_text)
+    return True
 
 
 def write_stru(
@@ -866,9 +951,25 @@ def make_input(
     return "\n".join(body) + "\n"
 
 
+def precision_target_requested(args, extra: dict[str, str]) -> bool:
+    if getattr(args, "dos", False):
+        return True
+    if (getattr(args, "kind", "") or "").lower() != "nscf":
+        return False
+    return any(key in extra for key in PRECISION_TARGET_KEYS)
+
+
+def input_template_orbital_dir(args, extra: dict[str, str]) -> tuple[Path, bool]:
+    if args.orbital_dir:
+        return args.orbital_dir, False
+    if precision_target_requested(args, extra):
+        return DEFAULT_ORBITAL_DIRS["precision"], True
+    return DEFAULT_ORBITAL_DIRS[args.orbital_quality], False
+
+
 def input_template_params(args) -> list[tuple[str, object]]:
-    orbital_dir = args.orbital_dir or DEFAULT_ORBITAL_DIRS[args.orbital_quality]
     extra = parse_key_values(args.set)
+    orbital_dir, _ = input_template_orbital_dir(args, extra)
     params: list[tuple[str, object]] = [
         ("suffix", args.suffix),
         ("calculation", args.kind),
@@ -939,10 +1040,17 @@ def format_input_params(params: list[tuple[str, object]], with_comments: bool = 
 
 
 def cmd_input_template(args) -> None:
+    extra = parse_key_values(args.set)
+    orbital_dir, auto_precision = input_template_orbital_dir(args, extra)
     text = format_input_params(input_template_params(args), with_comments=not args.no_comments)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(text)
     print(f"wrote {args.kind} INPUT template to {args.out}")
+    stru = args.out.parent / "STRU"
+    if auto_precision and getattr(args, "basis_type", "lcao") == "lcao" and stru.is_file():
+        changed = sync_stru_orbitals(stru, orbital_dir)
+        status = "updated" if changed else "already used"
+        print(f"{status} precision numerical orbitals in {stru}")
 
 
 def write_kpt(path: Path, mesh: tuple[int, int, int], shift: tuple[int, int, int], model: str) -> None:
@@ -1589,6 +1697,7 @@ def parse_abacus_status(job: Path) -> dict:
         re.search(r"(^|\n)\s*(error|fatal)\b", text, flags=re.IGNORECASE)
     )
     positive = [
+        r"scf\s+is\s+converged",
         r"charge\s+density\s+convergence\s+is\s+achieved",
         r"\bconvergence\s+is\s+achieved",
         r"relaxation\s+is\s+converged",
@@ -2430,13 +2539,15 @@ def cmd_plot_dos(args) -> None:
     if kind == "auto":
         if find_first_file(root, ["PDOS"], ["PDOS*"]) and args.select:
             kind = "pdos"
+        elif find_first_file(root, ["TDOS.dat", "DOS1_smearing.dat", "DOS1"], ["TDOS*.dat", "DOS*_smearing.dat", "DOS*"]):
+            kind = "dos"
         elif find_first_file(root, ["LDOS.txt"], ["LDOS*.txt"]):
             kind = "ldos"
         else:
             kind = "dos"
 
     if kind == "dos":
-        dos_file = args.file or find_first_file(root, ["DOS1_smearing.dat", "DOS1"], ["DOS*_smearing.dat", "DOS*"])
+        dos_file = args.file or find_first_file(root, ["TDOS.dat", "DOS1_smearing.dat", "DOS1"], ["TDOS*.dat", "DOS*_smearing.dat", "DOS*"])
         if not dos_file:
             die(f"cannot find DOS file under {root}")
         data = read_numeric_table(dos_file)
@@ -3295,33 +3406,39 @@ def apply_input_target_template(state: dict, target: str) -> None:
         state["kind"] = "nscf"
         state["dos"] = True
         state["no_kspacing"] = True
+        state["orbital_quality"] = "precision"
+        state["orbital_dir"] = None
         set_extra_setting(state, "init_chg", "file")
         set_extra_setting(state, "read_file_dir", "./")
         set_extra_setting(state, "out_dos", 1)
         set_extra_setting(state, "dos_sigma", 0.07)
         set_extra_setting(state, "dos_edelta_ev", 0.01)
-        print("DOS target template applied. kspacing is disabled; prepare a dense KPT mesh and previous charge density.")
+        print("DOS target template applied. Precision LCAO basis is enabled and kspacing is disabled; prepare a dense KPT mesh and previous charge density.")
     elif target == "pdos":
         state["kind"] = "nscf"
         state["dos"] = True
         state["no_kspacing"] = True
+        state["orbital_quality"] = "precision"
+        state["orbital_dir"] = None
         set_extra_setting(state, "init_chg", "file")
         set_extra_setting(state, "read_file_dir", "./")
         set_extra_setting(state, "out_dos", 2)
         set_extra_setting(state, "dos_sigma", 0.07)
         set_extra_setting(state, "dos_edelta_ev", 0.01)
-        print("PDOS target template applied. kspacing is disabled; prepare a dense KPT mesh.")
+        print("PDOS target template applied. Precision LCAO basis is enabled and kspacing is disabled; prepare a dense KPT mesh.")
     elif target == "band":
         state["kind"] = "nscf"
         state["dos"] = False
         state["no_kspacing"] = True
+        state["orbital_quality"] = "precision"
+        state["orbital_dir"] = None
         set_extra_setting(state, "init_chg", "file")
         set_extra_setting(state, "read_file_dir", "./")
         set_extra_setting(state, "out_band", 1)
         set_extra_setting(state, "out_proj_band", 1)
         set_extra_setting(state, "smearing_method", "gaussian")
         set_extra_setting(state, "smearing_sigma", 0.02)
-        print("Band target template applied. kspacing is disabled so ABACUS will use the line-mode KPT file.")
+        print("Band target template applied. Precision LCAO basis is enabled and kspacing is disabled so ABACUS will use the line-mode KPT file.")
     elif target == "cohp":
         state["kind"] = "scf"
         state["basis_type"] = "lcao"
