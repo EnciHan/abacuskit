@@ -31,11 +31,13 @@ from ase.io import read, write
 
 try:
     from . import __affiliation__, __author__, __version__
+    from .bader import run_bader_analysis, write_bader_csv, write_bader_json
     from .cohp import build_orbital_map, format_orbital_map, resolve_orbital_arguments, run_cohp
 except ImportError:
     __version__ = "v1.2"
     __author__ = "Han Enci, Zhong Lisheng, Yu Yutong, Xu Mengting, Chen Jingyuan"
     __affiliation__ = "Xi'an University of Technology"
+    from bader import run_bader_analysis, write_bader_csv, write_bader_json
     from cohp import build_orbital_map, format_orbital_map, resolve_orbital_arguments, run_cohp
 
 BOHR_PER_ANGSTROM = 1.88972612546
@@ -204,6 +206,7 @@ DFTU_KEYS = (
 )
 DFTU_MIXING_KEYS = ("mixing_restart", "mixing_dmr", "uramping")
 PRECISION_TARGET_KEYS = {"out_band", "out_proj_band", "out_dos"}
+HYBRID_FUNCTIONALS = {"hse", "hse06", "pbe0", "hf"}
 TERMINAL_LOGO = [
     r"  ___   ____    ___    ____  _   _  ____  _  __  ___  _____ ",
     r" / _ \ | __ )  / _ \  / ___|| | | |/ ___|| |/ / |_ _||_   _|",
@@ -896,40 +899,39 @@ def make_input(
     cal_stress: bool,
     extra: dict[str, str],
 ) -> str:
+    def add_default(key: str, value: object) -> None:
+        if key not in extra:
+            params.append((key, value))
+
     params: list[tuple[str, object]] = [
         ("suffix", suffix),
         ("calculation", calculation),
         ("stru_file", "STRU"),
         ("pseudo_dir", pseudo_dir),
     ]
-    if basis_type == "lcao":
+    if basis_type == "lcao" and "orbital_dir" not in extra:
         params.append(("orbital_dir", orbital_dir))
-    params += [
-        ("basis_type", basis_type),
-        ("ks_solver", ks_solver),
-        ("device", device),
-        ("symmetry", 0),
-        ("gamma_only", 0),
-        ("kspacing", kspacing),
-        ("dft_functional", "PBE"),
-        ("ecutwfc", ecutwfc),
-        ("nspin", nspin),
-        ("scf_thr", "1e-6"),
-        ("scf_nmax", 300),
-        ("mixing_type", "broyden"),
-        ("mixing_beta", 0.10),
-        ("mixing_ndim", 20),
-        ("cal_force", 1),
-        ("cal_stress", 1 if cal_stress else 0),
-    ]
-    if "out_wfc_lcao" not in extra:
-        params.append(("out_wfc_lcao", 0))
-    if "out_chg" not in extra:
-        params.append(("out_chg", 0))
-    if "smearing_method" not in extra:
-        params.append(("smearing_method", "gauss"))
-    if "smearing_sigma" not in extra:
-        params.append(("smearing_sigma", 0.015))
+    add_default("basis_type", basis_type)
+    add_default("ks_solver", ks_solver)
+    add_default("device", device)
+    add_default("symmetry", 0)
+    add_default("gamma_only", 0)
+    add_default("kspacing", kspacing)
+    if "dft_functional" not in extra:
+        params.append(("dft_functional", "PBE"))
+    add_default("ecutwfc", ecutwfc)
+    add_default("nspin", nspin)
+    add_default("scf_thr", "1e-6")
+    add_default("scf_nmax", 300)
+    add_default("mixing_type", "broyden")
+    add_default("mixing_beta", 0.10)
+    add_default("mixing_ndim", 20)
+    add_default("cal_force", 1)
+    add_default("cal_stress", 1 if cal_stress else 0)
+    add_default("out_wfc_lcao", 0)
+    add_default("out_chg", 0)
+    add_default("smearing_method", "gauss")
+    add_default("smearing_sigma", 0.015)
     if calculation == "md":
         params += [
             ("md_nstep", extra.pop("md_nstep", "1000")),
@@ -954,12 +956,17 @@ def make_input(
 def precision_target_requested(args, extra: dict[str, str]) -> bool:
     if getattr(args, "dos", False):
         return True
+    dft_functional = extra.get("dft_functional", "").strip().lower()
+    if dft_functional in HYBRID_FUNCTIONALS or any(key.startswith("exx_") for key in extra):
+        return True
     if (getattr(args, "kind", "") or "").lower() != "nscf":
         return False
     return any(key in extra for key in PRECISION_TARGET_KEYS)
 
 
 def input_template_orbital_dir(args, extra: dict[str, str]) -> tuple[Path, bool]:
+    if "orbital_dir" in extra:
+        return Path(extra["orbital_dir"]), False
     if args.orbital_dir:
         return args.orbital_dir, False
     if precision_target_requested(args, extra):
@@ -970,43 +977,40 @@ def input_template_orbital_dir(args, extra: dict[str, str]) -> tuple[Path, bool]
 def input_template_params(args) -> list[tuple[str, object]]:
     extra = parse_key_values(args.set)
     orbital_dir, _ = input_template_orbital_dir(args, extra)
+    def add_default(key: str, value: object) -> None:
+        if key not in extra:
+            params.append((key, value))
+
     params: list[tuple[str, object]] = [
         ("suffix", args.suffix),
         ("calculation", args.kind),
         ("stru_file", "STRU"),
         ("pseudo_dir", args.pseudo_dir),
     ]
-    if args.basis_type == "lcao":
+    if args.basis_type == "lcao" and "orbital_dir" not in extra:
         params.append(("orbital_dir", orbital_dir))
-    params += [
-        ("basis_type", args.basis_type),
-        ("ks_solver", args.ks_solver),
-        ("device", args.device),
-        ("symmetry", 0),
-        ("gamma_only", 0),
-    ]
+    add_default("basis_type", args.basis_type)
+    add_default("ks_solver", args.ks_solver)
+    add_default("device", args.device)
+    add_default("symmetry", 0)
+    add_default("gamma_only", 0)
     if not getattr(args, "no_kspacing", False):
-        params.append(("kspacing", args.kspacing))
-    params += [
-        ("dft_functional", "PBE"),
-        ("ecutwfc", args.ecutwfc),
-        ("nspin", args.nspin),
-        ("scf_thr", "1e-6"),
-        ("scf_nmax", 300),
-        ("mixing_type", "broyden"),
-        ("mixing_beta", 0.10),
-        ("mixing_ndim", 20),
-        ("cal_force", 1),
-        ("cal_stress", 1 if args.kind == "relax" or args.cal_stress else 0),
-    ]
-    if "out_wfc_lcao" not in extra:
-        params.append(("out_wfc_lcao", 0))
-    if "out_chg" not in extra:
-        params.append(("out_chg", 0))
-    if "smearing_method" not in extra:
-        params.append(("smearing_method", "gauss"))
-    if "smearing_sigma" not in extra:
-        params.append(("smearing_sigma", 0.015))
+        add_default("kspacing", args.kspacing)
+    if "dft_functional" not in extra:
+        params.append(("dft_functional", "PBE"))
+    add_default("ecutwfc", args.ecutwfc)
+    add_default("nspin", args.nspin)
+    add_default("scf_thr", "1e-6")
+    add_default("scf_nmax", 300)
+    add_default("mixing_type", "broyden")
+    add_default("mixing_beta", 0.10)
+    add_default("mixing_ndim", 20)
+    add_default("cal_force", 1)
+    add_default("cal_stress", 1 if args.kind == "relax" or args.cal_stress else 0)
+    add_default("out_wfc_lcao", 0)
+    add_default("out_chg", 0)
+    add_default("smearing_method", "gauss")
+    add_default("smearing_sigma", 0.015)
     if args.kind == "relax":
         params += [
             ("relax_method", "cg"),
@@ -1040,6 +1044,36 @@ def format_input_params(params: list[tuple[str, object]], with_comments: bool = 
 
 
 def cmd_input_template(args) -> None:
+    if getattr(args, "hybrid_hse_scf", False) and getattr(args, "hybrid_hse_band", False):
+        die("--hybrid-hse-scf and --hybrid-hse-band are mutually exclusive")
+    if getattr(args, "hybrid_hse_scf", False) or getattr(args, "hybrid_hse_band", False):
+        user_settings = list(args.set or [])
+        template_settings: list[str]
+        args.basis_type = "lcao"
+        args.device = "cpu"
+        args.ks_solver = "genelpa"
+        args.orbital_quality = "precision"
+        args.orbital_dir = None
+        if args.hybrid_hse_scf:
+            args.kind = "scf"
+            args.no_kspacing = False
+            template_settings = ["dft_functional=hse", "exx_hybrid_step=100", "out_chg=1"]
+        else:
+            args.kind = "nscf"
+            args.no_kspacing = True
+            template_settings = [
+                "dft_functional=hse",
+                "exx_hybrid_step=100",
+                "kpoint_file=KPT",
+                "init_chg=file",
+                "read_file_dir=./",
+                "out_band=1",
+                "cal_force=0",
+                "cal_stress=0",
+                "smearing_method=gaussian",
+                "smearing_sigma=0.02",
+            ]
+        args.set = template_settings + user_settings
     extra = parse_key_values(args.set)
     orbital_dir, auto_precision = input_template_orbital_dir(args, extra)
     text = format_input_params(input_template_params(args), with_comments=not args.no_comments)
@@ -1131,7 +1165,7 @@ def write_kpt_path(
     ]
     for label, coords, count in special_points:
         lines.append(
-            f"{coords[0]: .10f} {coords[1]: .10f} {coords[2]: .10f} {count:d} # {seekpath_label(label)}"
+            f"{coords[0]: .10f} {coords[1]: .10f} {coords[2]: .10f} {count:d}"
         )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n")
@@ -3262,7 +3296,7 @@ def interactive_cif2stru() -> None:
 
 
 def interactive_make_candidates() -> None:
-    print("\n[15] Make candidate CIFs\n")
+    print("\n[16] Make candidate CIFs\n")
     cif = choose_cif_from_current_dir()
     if cif is None:
         cif = prompt_path("Seed CIF file")
@@ -3281,7 +3315,7 @@ def interactive_make_candidates() -> None:
 
 
 def interactive_prepare_abacus() -> None:
-    print("\n[14] Prepare ABACUS jobs\n")
+    print("\n[15] Prepare ABACUS jobs\n")
     cifs = [Path(x).expanduser() for x in prompt_multi("CIF file or directory paths")]
     if not cifs:
         cifs = [prompt_path("CIF file or directory path", "01_candidates")]
@@ -3390,6 +3424,8 @@ Current settings:
   229) Clear DFT+U convergence-aid settings
   230) Apply ELF cube-output template
   231) Apply charge-density cube-output template
+  232) Apply hybrid HSE SCF template
+  233) Apply hybrid HSE band/NSCF template
   0) Back to previous menu
   q) Quit abacuskit
 """
@@ -3466,6 +3502,39 @@ def apply_input_target_template(state: dict, target: str) -> None:
         state["no_kspacing"] = False
         set_extra_setting(state, "out_chg", "1 3")
         print("Charge-density cube-output template applied. ABACUS will write charge-density cube files.")
+    elif target == "hybrid-scf":
+        state["kind"] = "scf"
+        state["dos"] = False
+        state["no_kspacing"] = False
+        state["basis_type"] = "lcao"
+        state["orbital_quality"] = "precision"
+        state["orbital_dir"] = None
+        state["device"] = "cpu"
+        state["ks_solver"] = "genelpa"
+        set_extra_setting(state, "dft_functional", "hse")
+        set_extra_setting(state, "exx_hybrid_step", 100)
+        set_extra_setting(state, "out_chg", 1)
+        print("Hybrid HSE SCF template applied. Precision LCAO, CPU device, and genelpa solver are enabled; ABACUS must be compiled with LibRI.")
+    elif target == "hybrid-band":
+        state["kind"] = "nscf"
+        state["dos"] = False
+        state["no_kspacing"] = True
+        state["basis_type"] = "lcao"
+        state["orbital_quality"] = "precision"
+        state["orbital_dir"] = None
+        state["device"] = "cpu"
+        state["ks_solver"] = "genelpa"
+        set_extra_setting(state, "dft_functional", "hse")
+        set_extra_setting(state, "exx_hybrid_step", 100)
+        set_extra_setting(state, "kpoint_file", "KPT")
+        set_extra_setting(state, "init_chg", "file")
+        set_extra_setting(state, "read_file_dir", "./")
+        set_extra_setting(state, "out_band", 1)
+        set_extra_setting(state, "cal_force", 0)
+        set_extra_setting(state, "cal_stress", 0)
+        set_extra_setting(state, "smearing_method", "gaussian")
+        set_extra_setting(state, "smearing_sigma", 0.02)
+        print("Hybrid HSE band/NSCF template applied. Precision LCAO, CPU device, and genelpa solver are enabled; kspacing is disabled for line-mode KPT.")
     else:
         die(f"unknown INPUT target template: {target}")
 
@@ -3586,6 +3655,10 @@ def interactive_input_template() -> None:
                 apply_input_target_template(state, "elf")
             elif choice == "231":
                 apply_input_target_template(state, "charge")
+            elif choice == "232":
+                apply_input_target_template(state, "hybrid-scf")
+            elif choice == "233":
+                apply_input_target_template(state, "hybrid-band")
             else:
                 print("Unknown 20x option.")
         except SystemExit as exc:
@@ -3601,7 +3674,7 @@ def interactive_check_abacus() -> None:
 
 
 def interactive_launch_script() -> None:
-    print("\n[18] Create ABACUS launch scripts\n")
+    print("\n[19] Create ABACUS launch scripts\n")
     jobs = [Path(x).expanduser() for x in prompt_multi("ABACUS job directory paths")]
     if not jobs:
         jobs = [prompt_path("ABACUS job directory path", ".")]
@@ -3677,7 +3750,7 @@ def interactive_kpt() -> None:
 
 
 def interactive_conv_test() -> None:
-    print("\n[16] Prepare convergence-test jobs\n")
+    print("\n[17] Prepare convergence-test jobs\n")
     jobs = [Path(x).expanduser() for x in prompt_multi("Template ABACUS job paths")]
     if not jobs:
         jobs = [prompt_path("Template ABACUS job path", ".")]
@@ -3697,7 +3770,7 @@ def interactive_conv_test() -> None:
 
 
 def interactive_collect_report() -> None:
-    print("\n[17] Collect ABACUS metrics / report\n")
+    print("\n[18] Collect ABACUS metrics / report\n")
     jobs = [Path(x).expanduser() for x in prompt_multi("ABACUS job directory paths")]
     if not jobs:
         jobs = [prompt_path("ABACUS job directory path", "02_abacus_sp")]
@@ -3867,8 +3940,30 @@ def interactive_cohp() -> None:
     print("Unknown 13x option.")
 
 
+def interactive_bader() -> None:
+    print("\n[14] Bader charge analysis\n")
+    bader_text = prompt_text("bader executable, empty for PATH/ABACUSKIT_BADER", "")
+    cube_text = prompt_text("Explicit charge cube, empty for auto", "")
+    ref_text = prompt_text("Reference cube for bader -ref, empty for none", "")
+    args = argparse.Namespace(
+        path=prompt_path("ABACUS job, OUT.* directory, or cube file", "."),
+        cube=Path(cube_text).expanduser() if cube_text else None,
+        reference_cube=Path(ref_text).expanduser() if ref_text else None,
+        bader=Path(bader_text).expanduser() if bader_text else None,
+        work_dir=prompt_path("Bader work directory", "bader_work"),
+        total_cube=None,
+        bader_arg=[],
+        out=prompt_path("CSV output", "bader.csv"),
+        json=prompt_path("JSON output", "bader.json"),
+        no_json=False,
+    )
+    cmd_bader(args)
+    print("Bader analysis finished. Exiting abacuskit.")
+    raise ProgramExit
+
+
 def interactive_collect_deepmd() -> None:
-    print("\n[19] Collect ABACUS outputs to DeepMD data\n")
+    print("\n[20] Collect ABACUS outputs to DeepMD data\n")
     jobs = [Path(x).expanduser() for x in prompt_multi("ABACUS job directory paths")]
     if not jobs:
         jobs = [prompt_path("ABACUS job directory path", "02_abacus_sp")]
@@ -3886,7 +3981,7 @@ def interactive_collect_deepmd() -> None:
 
 
 def interactive_make_train() -> None:
-    print("\n[20] Make DeepMD training input\n")
+    print("\n[21] Make DeepMD training input\n")
     train_systems = [Path(x).expanduser() for x in prompt_multi("Training system paths")]
     valid_systems = [Path(x).expanduser() for x in prompt_multi("Validation system paths, empty for none")]
     type_map = prompt_multi("Type map, e.g. C H O Ni, empty to infer") or None
@@ -3901,7 +3996,7 @@ def interactive_make_train() -> None:
 
 
 def interactive_init_workflow() -> None:
-    print("\n[21] Init workflow skeleton\n")
+    print("\n[22] Init workflow skeleton\n")
     args = argparse.Namespace(out=prompt_path("Workflow root directory", "abacus_deepmd_project"))
     cmd_init_workflow(args)
 
@@ -3934,7 +4029,7 @@ def save_user_config(updates: dict[str, str]) -> None:
 
 
 def interactive_config_apns_paths() -> None:
-    print("\n[22] Search and save APNS pseudopotential/orbital paths\n")
+    print("\n[23] Search and save APNS pseudopotential/orbital paths\n")
     resources = apns_resource_status()
     print_apns_resource_status(resources)
 
@@ -4046,6 +4141,41 @@ def cmd_cohp(args) -> None:
     print(f"metadata: {metadata['files']['metadata']}")
 
 
+def cmd_bader(args) -> None:
+    path = resolve_out_path(args.path)
+    bader_program = args.bader if args.bader else None
+    json_out = None if args.no_json else args.json
+    try:
+        metadata = run_bader_analysis(
+            path=path,
+            cube=args.cube,
+            work_dir=args.work_dir,
+            total_cube=args.total_cube,
+            bader=bader_program,
+            reference_cube=args.reference_cube,
+            extra_args=args.bader_arg,
+        )
+        rows = metadata["rows"]
+        write_bader_csv(args.out, rows)
+        if json_out:
+            write_bader_json(json_out, metadata)
+    except (OSError, RuntimeError, ValueError) as exc:
+        die(str(exc))
+
+    total_charge = sum(float(row["charge"]) for row in rows)
+    total_bader = sum(float(row["bader_electrons"]) for row in rows)
+    print(f"Bader atoms: {len(rows)}")
+    print(f"Bader electrons: {total_bader:.8f}")
+    print(f"Net valence charge sum: {total_charge:.8f}")
+    print(f"charge cube: {metadata['files']['charge_cube']}")
+    if metadata["generated_total_cube"]:
+        print("spin channels: summed SPIN1_CHG.cube + SPIN2_CHG.cube")
+    print(f"ACF.dat: {metadata['files']['acf']}")
+    print(f"CSV: {args.out}")
+    if json_out:
+        print(f"JSON: {json_out}")
+
+
 def interactive_fix_stru_range() -> None:
     print("\n[5] Fix STRU atoms by coordinate range\n")
     stru = Path("STRU")
@@ -4104,17 +4234,18 @@ Affiliation: {__affiliation__}
   11) Plot DOS / PDOS / LDOS
   12) Auto plot BAND for current directory
   13) ABACUS LCAO COHP
+  14) Bader charge analysis
 
-  14) Prepare ABACUS jobs
-  15) Make candidate CIFs
-  16) Prepare convergence-test jobs
-  17) Collect ABACUS metrics / report
-  18) Create ABACUS launch scripts
-  19) Collect ABACUS outputs to DeepMD data
-  20) Make DeepMD training input
-  21) Init workflow skeleton
+  15) Prepare ABACUS jobs
+  16) Make candidate CIFs
+  17) Prepare convergence-test jobs
+  18) Collect ABACUS metrics / report
+  19) Create ABACUS launch scripts
+  20) Collect ABACUS outputs to DeepMD data
+  21) Make DeepMD training input
+  22) Init workflow skeleton
 
-  22) Search/save APNS pseudopotential and orbital paths
+  23) Search/save APNS pseudopotential and orbital paths
   h) Show command-line help
   q) Quit abacuskit
   0) Exit
@@ -4137,15 +4268,16 @@ def interactive_menu() -> None:
         "11": interactive_plot_dos,
         "12": interactive_plot_band,
         "13": interactive_cohp,
-        "14": interactive_prepare_abacus,
-        "15": interactive_make_candidates,
-        "16": interactive_conv_test,
-        "17": interactive_collect_report,
-        "18": interactive_launch_script,
-        "19": interactive_collect_deepmd,
-        "20": interactive_make_train,
-        "21": interactive_init_workflow,
-        "22": interactive_config_apns_paths,
+        "14": interactive_bader,
+        "15": interactive_prepare_abacus,
+        "16": interactive_make_candidates,
+        "17": interactive_conv_test,
+        "18": interactive_collect_report,
+        "19": interactive_launch_script,
+        "20": interactive_collect_deepmd,
+        "21": interactive_make_train,
+        "22": interactive_init_workflow,
+        "23": interactive_config_apns_paths,
     }
     while True:
         print_interactive_menu()
@@ -4295,6 +4427,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--force-thr-ev", type=float, default=0.04)
     p.add_argument("--stress-thr", type=float, default=1.0)
     p.add_argument("--dos", action="store_true", help="include DOS/PDOS output parameters")
+    p.add_argument("--hybrid-hse-scf", action="store_true", help="apply the LCAO HSE SCF template used by menu option 232")
+    p.add_argument("--hybrid-hse-band", action="store_true", help="apply the LCAO HSE band/NSCF template used by menu option 233")
     p.add_argument("--set", action="append", help="extra INPUT key=value; can be repeated")
     p.add_argument("--no-comments", action="store_true")
     p.set_defaults(func=cmd_input_template)
@@ -4422,6 +4556,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cmap", help="matplotlib colormap name")
     p.add_argument("--out", type=Path, required=True)
     p.set_defaults(func=cmd_plot_grid)
+
+    p = sub.add_parser("bader", help="calculate Bader charges from ABACUS charge-density cube output")
+    p.add_argument("path", type=Path, nargs="?", default=Path("."), help="ABACUS job directory, OUT.* directory, or cube file")
+    p.add_argument("--cube", type=Path, help="explicit charge-density cube; otherwise auto-detect CHG/SPIN*_CHG")
+    p.add_argument("--reference-cube", "--ref", type=Path, help="optional reference cube passed to bader as -ref")
+    p.add_argument("--bader", type=Path, help="bader executable path; default uses ABACUSKIT_BADER or PATH")
+    p.add_argument("--work-dir", type=Path, default=Path("bader_work"), help="directory where bader writes ACF.dat")
+    p.add_argument("--total-cube", type=Path, help="output path for summed spin cube; default is work-dir/TOTAL_CHG.cube")
+    p.add_argument("--bader-arg", action="append", default=[], help="extra argument passed to bader; repeat as needed")
+    p.add_argument("--out", type=Path, default=Path("bader.csv"), help="CSV summary output")
+    p.add_argument("--json", type=Path, default=Path("bader.json"), help="JSON metadata output")
+    p.add_argument("--no-json", action="store_true", help="do not write JSON metadata")
+    p.set_defaults(func=cmd_bader)
 
     p = sub.add_parser("collect-deepmd", help="convert ABACUS outputs to DeepMD npy via dpdata")
     p.add_argument("jobs", type=Path, nargs="+")

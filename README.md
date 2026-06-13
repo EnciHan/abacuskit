@@ -4,9 +4,15 @@
 
 `abacuskit` 是一个集成式 ABACUS + DeepMD 命令行程序，用于生成 ABACUS 输入文件、准备批量任务、检查/汇总计算结果，并把 ABACUS 输出转换为 DeepMD 数据。
 
-- Version: v1.2.1
+- Version: v1.2.3
 - Author: Han Enci, Zhong Lisheng, Yu Yutong, Xu Mengting, Chen Jingyuan
 - Affiliation: Xi'an University of Technology
+
+## v1.2.3 更新记录
+
+- 新增 Bader 电荷后处理：自动识别 ABACUS 电荷密度 cube，自旋极化体系自动合并 `SPIN1_CHG.cube` 和 `SPIN2_CHG.cube`，调用外部 `bader` 并输出 CSV/JSON。
+- 将 Bader 电荷分析集成到交互菜单后处理模块，作为 `14` 号入口。
+- 新增 HSE SCF 和 HSE band/NSCF INPUT 模板入口，方便生成 LCAO hybrid 计算输入。
 
 ## v1.2.1 更新记录
 
@@ -24,7 +30,7 @@
 - 新增 APNS 赝势和轨道库路径自动搜索与保存功能，搜索结果写入 `~/.abacuskit/config.json`，后续生成输入时自动使用。
 - 新增内置 ABACUS LCAO COHP/COOP 后处理：读取 `data-*-H`、`data-*-S`、`WFC_NAO_K*.txt`、`kpoints` 和 `running_scf.log`，支持 atom index + shell 或全局 NAO index 选择，输出 `.dat`、`_EminusEf.dat`、`.png`、`.json`。
 - 新增 ICOHP 输出：对 COHP/COOP 曲线积分到 `E_Fermi`，同时给出原始 `ICOHP` 和反号约定的 `-ICOHP`，并写入 `.icohp.txt` 与 metadata。
-- 重新整理交互菜单：`1-7` 为输入/结构工具，`8-13` 为后处理，`14-22` 为批量任务和工作流。
+- 重新整理交互菜单：`1-7` 为输入/结构工具，`8-14` 为后处理，`15-22` 为批量任务和工作流，`23` 为路径配置。
 - 新增依赖 `seekpath` 和 `spglib`，用于高对称路径生成。
 
 ## v1.1.1 更新记录
@@ -95,17 +101,18 @@ abacuskit
 11   Plot DOS / PDOS / LDOS
 12   Auto plot BAND for current directory
 13   ABACUS LCAO COHP
+14   Bader charge analysis
 
-14   Prepare ABACUS jobs
-15   Make candidate CIFs
-16   Prepare convergence-test jobs
-17   Collect ABACUS metrics / report
-18   Create ABACUS launch scripts
-19   Collect ABACUS outputs to DeepMD data
-20   Make DeepMD training input
-21   Init workflow skeleton
+15   Prepare ABACUS jobs
+16   Make candidate CIFs
+17   Prepare convergence-test jobs
+18   Collect ABACUS metrics / report
+19   Create ABACUS launch scripts
+20   Collect ABACUS outputs to DeepMD data
+21   Make DeepMD training input
+22   Init workflow skeleton
 
-22   Search/save APNS pseudopotential and orbital paths
+23   Search/save APNS pseudopotential and orbital paths
 ```
 
 常用的 CIF 转 STRU 菜单流程：
@@ -191,6 +198,8 @@ q    Quit abacuskit
 229  Clear DFT+U convergence-aid settings
 230  Apply ELF cube-output template
 231  Apply charge-density cube-output template
+232  Apply hybrid HSE SCF template
+233  Apply hybrid HSE band/NSCF template
 0    Back to previous menu
 q    Quit abacuskit
 ```
@@ -205,6 +214,9 @@ q    Quit abacuskit
 - `225` 会打开 `out_pot=2` 和 Z 方向偶极修正，作为 slab 功函数/静电势模板。
 - `230` 会写入 `out_elf="1 3"`，让 ABACUS 在 `OUT.<suffix>` 输出 ELF cube。
 - `231` 会写入 `out_chg="1 3"`，让 ABACUS 在 `OUT.<suffix>` 输出电荷密度 cube。
+- `232` 会切到 HSE 杂化泛函 LCAO SCF 模板，写入 `dft_functional=hse`、`exx_hybrid_step=100`、`out_chg=1`，并自动使用 precision LCAO、`device=cpu`、`ks_solver=genelpa`，适合先生成后续 NSCF 可读取的电荷密度。ABACUS 的 LCAO hybrid 需要使用带 LibRI 的构建。
+- `233` 会切到 HSE 杂化泛函 LCAO band/NSCF 模板，写入 `dft_functional=hse`、`init_chg=file`、`read_file_dir=./`、`out_band=1`、`cal_force=0`、`cal_stress=0`，同时不写 `kspacing`，需要配合 line-mode `KPT`。ABACUS 的 LCAO hybrid 需要使用带 LibRI 的构建。
+- 命令行也可直接生成同样模板：`abacuskit input-template --kind scf --hybrid-hse-scf --out INPUT` 和 `abacuskit input-template --kind nscf --hybrid-hse-band --out INPUT`。
 - 设置 `nspin=2` 后，生成的 `INPUT` 会显式写出 `mixing_beta_mag`、`mixing_gg0`、`mixing_gg0_mag`、`mixing_gg0_min`、`mixing_restart`、`mixing_dmr`，方便后续手动调磁性态收敛。
 - `226` 会写入 DFT+U 参数：`dft_plus_u`、`orbital_corr`、`hubbard_u`、`yukawa_potential`、`omc`，mode 1 还会写入 `onsite_radius`。`orbital_corr` 和 `hubbard_u` 的列表顺序要与 `STRU` 里的原子类型顺序一致。
 - `227` 会写入 DFT+U 常用收敛辅助参数：`mixing_restart`、`mixing_dmr`、`uramping`。
@@ -221,7 +233,7 @@ apns-orbitals-precision-v1
 
 自动搜索会检查当前目录、用户目录下常见的 `data/abacus-lib`、`apps` 等位置，也可以用 `ABACUSKIT_APNS_ROOT` 或 `ABACUSKIT_APNS_SEARCH_ROOTS` 指定搜索根目录。显式环境变量仍然优先级最高，适合机器上有多个库版本或需要指定自定义路径时使用：
 
-在交互菜单中输入 `22`，程序会自动扫描这三个路径并直接写入 `~/.abacuskit/config.json`，后续运行 `abacuskit` 会自动读取这个配置，不需要再手动 `export`。
+在交互菜单中输入 `23`，程序会自动扫描这三个路径并直接写入 `~/.abacuskit/config.json`，后续运行 `abacuskit` 会自动读取这个配置，不需要再手动 `export`。
 
 ```bash
 export ABACUSKIT_PSEUDO_DIR=/path/to/pseudopotentials
@@ -410,7 +422,7 @@ numactl --physcpubind=0-11 --membind=0 mpirun -np 1 --bind-to none abacus
 abacuskit abacus-versions
 ```
 
-菜单里输入 `18` 可以交互式创建启动脚本。
+菜单里输入 `19` 可以交互式创建启动脚本。
 
 ## 6. 生成 KPT
 
@@ -498,7 +510,7 @@ abacuskit report-metrics \
   --out abacuskit_report.html
 ```
 
-菜单里输入 `17` 会先收集 metrics，再询问是否生成 HTML 报告。
+菜单里输入 `18` 会先收集 metrics，再询问是否生成 HTML 报告。
 
 ## 10. 绘制 BAND / DOS / PDOS / LDOS
 
@@ -568,7 +580,47 @@ abacuskit plot-grid adsorbed/OUT.ABACUS \
 
 菜单里输入 `8` 会在当前目录自动绘制电荷密度并生成 `charge.png`；输入 `9` 会提示输入被减去的任务或输出目录，然后生成 `charge_diff.png` 和可选的 `charge_diff.cube`；输入 `10` 会在当前目录自动绘制 ELF 并生成 `elf.png`。
 
-## 12. ABACUS LCAO COHP 后处理
+## 12. Bader 电荷计算
+
+Bader 分析需要先让 ABACUS 输出电荷密度 cube。可以用 `2 -> 231` 生成包含 `out_chg 1 3` 的 `INPUT`，完成 SCF 后再运行：
+
+```bash
+abacuskit bader OUT.ABACUS \
+  --out bader.csv \
+  --json bader.json
+```
+
+`abacuskit` 会自动查找 `CHG.cube` 或 `SPIN1_CHG.cube`。如果同时存在 `SPIN1_CHG.cube` 和 `SPIN2_CHG.cube`，会先在 `bader_work/TOTAL_CHG.cube` 生成总电荷密度，再调用 Henkelman `bader` 程序。`ACF.dat`、`BCF.dat`、`AVF.dat` 等原始 Bader 输出会保留在 `bader_work/`。
+
+如果 `bader` 不在 `PATH` 中，可以显式指定：
+
+```bash
+abacuskit bader OUT.ABACUS --bader /path/to/bader
+```
+
+也可以设置环境变量：
+
+```bash
+export ABACUSKIT_BADER=/path/to/bader
+```
+
+输出 CSV 的主要列：
+
+```text
+atom_index,symbol,atomic_number,valence_electrons,bader_electrons,charge
+```
+
+其中 `charge = valence_electrons - bader_electrons`，正值表示该原子相对赝势价电子数失电子。由于 ABACUS cube 通常是赝势价电子密度，这里的 Bader 电荷应理解为基于价电子密度的 Bader 电荷，适合同一赝势设置下的电荷转移和趋势比较。
+
+需要传递 Bader 的 `-ref` 参考密度时：
+
+```bash
+abacuskit bader OUT.ABACUS --reference-cube reference.cube
+```
+
+菜单里输入 `14` 可以在后处理模块中交互式运行 Bader 电荷分析。
+
+## 13. ABACUS LCAO COHP 后处理
 
 COHP/COOP 后处理需要先用 LCAO SCF 输出 H/S 矩阵和 NAO 波函数。菜单里输入 `13` 会进入 COHP 子菜单：
 
@@ -602,7 +654,7 @@ abacuskit cohp OUT.ABACUS \
   --output-prefix pair_COHP
 ```
 
-## 13. ABACUS 输出转 DeepMD 数据
+## 14. ABACUS 输出转 DeepMD 数据
 
 ```bash
 abacuskit collect-deepmd 02_abacus_sp \
@@ -618,7 +670,7 @@ abacuskit collect-deepmd 02_abacus_sp \
 
 转换报告写入 `03_deepmd_data/collect_report.json`。
 
-## 14. 生成 DeepMD 训练输入并训练
+## 15. 生成 DeepMD 训练输入并训练
 
 ```bash
 abacuskit make-train 03_deepmd_data/train/* \
@@ -636,7 +688,7 @@ bash run_deepmd.sh
 --type-map C H O Ni
 ```
 
-## 15. 一键生成流程骨架
+## 16. 一键生成流程骨架
 
 ```bash
 abacuskit init-workflow --out my_abacus_deepmd_project
