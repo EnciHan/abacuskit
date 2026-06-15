@@ -2566,6 +2566,52 @@ def parse_line_kpt_ticks(
     return ticks, labels
 
 
+def line_kpt_break_indices(kpt: Path | None, nk: int) -> list[int]:
+    if not kpt or not kpt.is_file():
+        return []
+    raw_lines = [line.strip() for line in kpt.read_text(errors="ignore").splitlines()]
+    entries = []
+    for raw in raw_lines:
+        body = raw.partition("#")[0].strip()
+        if body:
+            entries.append(body)
+    if len(entries) < 4 or entries[2].lower() != "line":
+        return []
+    try:
+        npoint = int(float(entries[1].split()[0]))
+    except ValueError:
+        return []
+    counts: list[int] = []
+    for line in entries[3 : 3 + npoint]:
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        try:
+            counts.append(int(float(parts[3])))
+        except ValueError:
+            continue
+    breaks: list[int] = []
+    total = 0
+    for count in counts[:-1]:
+        total += max(count, 1)
+        if count <= 1 and 0 < total < nk:
+            breaks.append(total)
+    return breaks
+
+
+def compact_line_kpt_breaks(x: np.ndarray, break_indices: list[int]) -> np.ndarray:
+    if not break_indices:
+        return x
+    compact = np.array(x, dtype=float, copy=True)
+    for start in sorted(set(break_indices)):
+        if start <= 0 or start >= len(compact):
+            continue
+        jump = float(compact[start] - compact[start - 1])
+        if jump > 1.0e-10:
+            compact[start:] -= jump
+    return compact
+
+
 def find_pband_file(root: Path) -> Path | None:
     if root.is_file():
         root = root.parent
@@ -2798,6 +2844,7 @@ def load_band_plot_data(
     bands = data[:, 2:] - fermi
     kpt_file = explicit_kpt or find_kpt_file(root)
     high_symmetry_points = find_high_symmetry_points_file(root, kpt_file)
+    x = compact_line_kpt_breaks(x, line_kpt_break_indices(kpt_file, len(x)))
     ticks, labels = parse_line_kpt_ticks(kpt_file, x, high_symmetry_points)
     return {
         "band_file": band_file,
