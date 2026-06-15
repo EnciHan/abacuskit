@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from collections import defaultdict
 from pathlib import Path
 from typing import Iterable
@@ -34,7 +35,7 @@ try:
     from .bader import run_bader_analysis, write_bader_csv, write_bader_json
     from .cohp import build_orbital_map, format_orbital_map, resolve_orbital_arguments, run_cohp
 except ImportError:
-    __version__ = "v1.2"
+    __version__ = "v1.2.4"
     __author__ = "Han Enci, Zhong Lisheng, Yu Yutong, Xu Mengting, Chen Jingyuan"
     __affiliation__ = "Xi'an University of Technology"
     from bader import run_bader_analysis, write_bader_csv, write_bader_json
@@ -194,6 +195,13 @@ DEFAULT_DEEPMD_PYTHON = env_path("ABACUSKIT_DEEPMD_PYTHON", sys.executable)
 DEFAULT_DP = env_path("ABACUSKIT_DP", "dp")
 ORBITAL_LABEL_TO_L = {"s": 0, "p": 1, "d": 2, "f": 3, "g": 4}
 L_TO_ORBITAL_LABEL = {v: k for k, v in ORBITAL_LABEL_TO_L.items()}
+ORBITAL_COLORS = {
+    "s": "#1f77b4",
+    "p": "#d62728",
+    "d": "#2ca02c",
+    "f": "#9467bd",
+    "g": "#8c564b",
+}
 DFTU_KEYS = (
     "dft_plus_u",
     "orbital_corr",
@@ -1165,7 +1173,7 @@ def write_kpt_path(
     ]
     for label, coords, count in special_points:
         lines.append(
-            f"{coords[0]: .10f} {coords[1]: .10f} {coords[2]: .10f} {count:d}"
+            f"{coords[0]: .10f} {coords[1]: .10f} {coords[2]: .10f} {count:d} # {seekpath_label(label)}"
         )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n")
@@ -2261,6 +2269,31 @@ def read_numeric_table(path: Path) -> np.ndarray:
     return np.array(rows, dtype=float)
 
 
+def split_band_table_blocks(data: np.ndarray) -> list[np.ndarray]:
+    if data.shape[0] < 2 or data.shape[1] < 2:
+        return [data]
+    resets = np.where((np.diff(data[:, 0]) < 0) | (np.diff(data[:, 1]) < -1.0e-10))[0] + 1
+    if resets.size == 0:
+        return [data]
+    starts = [0, *[int(i) for i in resets], data.shape[0]]
+    return [data[starts[i] : starts[i + 1]] for i in range(len(starts) - 1) if starts[i + 1] > starts[i]]
+
+
+def select_band_table_block(data: np.ndarray) -> tuple[np.ndarray, str | None]:
+    blocks = split_band_table_blocks(data)
+    if len(blocks) == 1:
+        return data, None
+    first = blocks[0]
+    same_blocks = [
+        block
+        for block in blocks[1:]
+        if block.shape == first.shape and np.allclose(block[:, 1:], first[:, 1:], rtol=0.0, atol=1.0e-8)
+    ]
+    if len(same_blocks) == len(blocks) - 1:
+        return first, f"ignored {len(blocks) - 1} duplicated band block(s)"
+    return first, f"found {len(blocks)} band blocks; plotted the first block"
+
+
 def parse_pdos_file(path: Path) -> tuple[np.ndarray, dict[tuple[str, str], np.ndarray]]:
     text = path.read_text(errors="ignore")
     energy_match = re.search(r"<energy_values[^>]*>(.*?)</energy_values>", text, re.S)
@@ -2294,7 +2327,7 @@ def parse_pdos_file(path: Path) -> tuple[np.ndarray, dict[tuple[str, str], np.nd
 def parse_selectors(items: list[str] | None) -> set[tuple[str, str]]:
     selectors: set[tuple[str, str]] = set()
     for item in items or []:
-        chunks = re.split(r"[,;]", item)
+        chunks = re.split(r"[;\s]+", item)
         for chunk in chunks:
             chunk = chunk.strip()
             if not chunk:
@@ -2305,7 +2338,12 @@ def parse_selectors(items: list[str] | None) -> set[tuple[str, str]]:
                 sym, orbitals = chunk.split(":", 1)
             else:
                 die(f"bad selector {chunk!r}; expected Element=s,p,d, for example Ni=d")
-            for orb in orbitals.replace("+", "").replace("/", "").replace(" ", ""):
+            orbital_text = orbitals.replace(" ", "")
+            if re.search(r"[,/+]", orbital_text):
+                orbital_items = [orb for orb in re.split(r"[,/+]+", orbital_text) if orb]
+            else:
+                orbital_items = list(orbital_text)
+            for orb in orbital_items:
                 orb = orb.lower()
                 if orb not in ORBITAL_LABEL_TO_L:
                     die(f"bad orbital label {orb!r}; use s, p, d, f, or g")
@@ -2391,6 +2429,47 @@ def kpoint_label(coords: tuple[float, float, float]) -> str:
     return "(" + ",".join(f"{x:g}" for x in rounded) + ")"
 
 
+def normalize_high_symmetry_label(label: str) -> str:
+    clean = label.strip()
+    if not clean:
+        return clean
+    upper = clean.upper()
+    if upper in {"GAMMA", "G", "Γ"}:
+        return r"$\Gamma$"
+    return clean.replace("Γ", r"$\Gamma$")
+
+
+def load_high_symmetry_points(path: Path | None) -> dict[str, tuple[float, float, float]]:
+    if not path or not path.is_file():
+        return {}
+    points: dict[str, tuple[float, float, float]] = {}
+    for raw in path.read_text(errors="ignore").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        try:
+            coords = tuple(float(v) for v in parts[1:4])
+        except ValueError:
+            continue
+        points[parts[0].strip()] = coords
+    return points
+
+
+def parse_kpoint_label(comment: str, coords: tuple[float, float, float], high_symmetry_points: Path | None = None) -> str:
+    label = comment.strip()
+    if label:
+        return normalize_high_symmetry_label(label.split()[0])
+    points = load_high_symmetry_points(high_symmetry_points)
+    rounded = tuple(round(x, 10) for x in coords)
+    for name, ref in points.items():
+        if tuple(round(x, 10) for x in ref) == rounded:
+            return normalize_high_symmetry_label(name)
+    return normalize_high_symmetry_label(kpoint_label(coords))
+
+
 def find_kpt_file(root: Path) -> Path | None:
     if root.is_file():
         root = root.parent
@@ -2404,7 +2483,37 @@ def find_kpt_file(root: Path) -> Path | None:
     return None
 
 
-def parse_line_kpt_ticks(kpt: Path | None, x: np.ndarray) -> tuple[list[float], list[str]]:
+def find_high_symmetry_points_file(root: Path, kpt: Path | None = None) -> Path | None:
+    bases: list[Path] = []
+    if kpt and kpt.is_file():
+        bases.extend([kpt.parent, kpt.parent.parent])
+    if root.is_file():
+        bases.extend([root.parent, root.parent.parent])
+    else:
+        bases.extend([root, root.parent])
+        outdir = find_abacus_outdir(root)
+        if outdir:
+            bases.extend([outdir, outdir.parent, outdir.parent.parent])
+    seen: set[Path] = set()
+    for base in bases:
+        candidate = base / "HIGH_SYMMETRY_POINTS"
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            resolved = candidate.absolute()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def parse_line_kpt_ticks(
+    kpt: Path | None,
+    x: np.ndarray,
+    high_symmetry_points: Path | None = None,
+) -> tuple[list[float], list[str]]:
     if not kpt or not kpt.is_file():
         return [float(x[0]), float(x[-1])], ["", ""]
     raw_lines = [line.strip() for line in kpt.read_text(errors="ignore").splitlines()]
@@ -2430,8 +2539,7 @@ def parse_line_kpt_ticks(kpt: Path | None, x: np.ndarray) -> tuple[list[float], 
             count = int(float(parts[3]))
         except ValueError:
             continue
-        label = comment.split()[0] if comment else kpoint_label(coords)
-        label = r"$\Gamma$" if label.upper() in {"GAMMA", "G", "Γ"} else label
+        label = parse_kpoint_label(comment, coords, high_symmetry_points)
         points.append((coords, count, label))
     if len(points) < 2:
         return [float(x[0]), float(x[-1])], ["", ""]
@@ -2456,6 +2564,145 @@ def parse_line_kpt_ticks(kpt: Path | None, x: np.ndarray) -> tuple[list[float], 
                 merged_labels.append(label)
         ticks, labels = merged_ticks, merged_labels
     return ticks, labels
+
+
+def find_pband_file(root: Path) -> Path | None:
+    if root.is_file():
+        root = root.parent
+    candidates = [
+        root / "pbands1.xml",
+        root / "PBANDS1.xml",
+        root / "pbands.xml",
+    ]
+    outdir = find_abacus_outdir(root)
+    if outdir:
+        candidates.extend(
+            [
+                outdir / "pbands1.xml",
+                outdir / "PBANDS1.xml",
+                outdir / "pbands.xml",
+            ]
+        )
+    for path in candidates:
+        if path.is_file():
+            return path
+    for pattern in ("pbands*.xml", "PBANDS*.xml"):
+        found = sorted([p for p in root.glob(pattern) if p.is_file()], key=lambda p: natural_key(p.name))
+        if found:
+            return found[0]
+        if outdir:
+            found = sorted([p for p in outdir.glob(pattern) if p.is_file()], key=lambda p: natural_key(p.name))
+            if found:
+                return found[0]
+    return None
+
+
+def find_input_info_file(root: Path) -> Path | None:
+    if root.is_file():
+        root = root.parent
+    candidates = [root / "INPUT.info"]
+    outdir = find_abacus_outdir(root)
+    if outdir:
+        candidates.append(outdir / "INPUT.info")
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+def parse_projected_band_file(path: Path) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray], list[dict[str, object]]]:
+    try:
+        root = ET.parse(path).getroot()
+    except ET.ParseError as exc:
+        die(f"cannot parse projected band XML {path}: {exc}")
+    band_node = root.find("band_structure")
+    if band_node is None:
+        die(f"cannot find band_structure in {path}")
+    band_text = band_node.text or ""
+    band_rows = [line.strip() for line in band_text.splitlines() if line.strip()]
+    bands = np.array([[float(x) for x in row.split()] for row in band_rows], dtype=float)
+    x = np.arange(bands.shape[0], dtype=float)
+    channels: dict[str, np.ndarray] = {label: np.zeros_like(bands) for label in ORBITAL_COLORS}
+    orbitals: list[dict[str, object]] = []
+    for orbital in root.findall("orbital"):
+        l_raw = orbital.attrib.get("l", "0").strip()
+        try:
+            l_value = int(float(l_raw))
+        except ValueError:
+            continue
+        label = L_TO_ORBITAL_LABEL.get(l_value)
+        if label is None:
+            continue
+        data_node = orbital.find("data")
+        if data_node is None or data_node.text is None:
+            continue
+        data_rows = [line.strip() for line in data_node.text.splitlines() if line.strip()]
+        if not data_rows:
+            continue
+        matrix = np.array([[float(x) for x in row.split()] for row in data_rows], dtype=float)
+        if matrix.shape[0] != bands.shape[0]:
+            continue
+        if matrix.shape[1] < bands.shape[1]:
+            continue
+        channels[label][:, :] += np.clip(matrix[:, : bands.shape[1]], 0.0, None)
+        orbitals.append(
+            {
+                "label": label,
+                "species": orbital.attrib.get("species", "").strip(),
+                "atom_index": orbital.attrib.get("atom_index", "").strip(),
+            }
+        )
+    return x, bands, channels, orbitals
+
+
+def project_band_weights(pband_file: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[dict[str, object]]]:
+    try:
+        root = ET.parse(pband_file).getroot()
+    except ET.ParseError as exc:
+        die(f"cannot parse projected band XML {pband_file}: {exc}")
+    band_node = root.find("band_structure")
+    if band_node is None:
+        die(f"cannot find band_structure in {pband_file}")
+    band_text = band_node.text or ""
+    band_rows = [line.strip() for line in band_text.splitlines() if line.strip()]
+    bands = np.array([[float(x) for x in row.split()] for row in band_rows], dtype=float)
+    x = np.arange(bands.shape[0], dtype=float)
+
+    orbital_rows: list[np.ndarray] = []
+    orbitals: list[dict[str, object]] = []
+    for orbital in root.findall("orbital"):
+        data_node = orbital.find("data")
+        if data_node is None or data_node.text is None:
+            continue
+        data_rows = [line.strip() for line in data_node.text.splitlines() if line.strip()]
+        if not data_rows:
+            continue
+        matrix = np.array([[float(x) for x in row.split()] for row in data_rows], dtype=float)
+        if matrix.shape != bands.shape:
+            continue
+        orbital_rows.append(np.clip(matrix, 0.0, None))
+        try:
+            l_value = int(float(orbital.attrib.get("l", "0").strip()))
+        except ValueError:
+            l_value = -1
+        orbitals.append(
+            {
+                "label": L_TO_ORBITAL_LABEL.get(l_value, ""),
+                "species": orbital.attrib.get("species", "").strip(),
+                "atom_index": orbital.attrib.get("atom_index", "").strip(),
+                "l": l_value,
+            }
+        )
+    if not orbital_rows:
+        die(f"no projected orbital data parsed from {pband_file}")
+    weights = np.stack(orbital_rows, axis=0)
+    total = weights.sum(axis=0)
+    total[total <= 0.0] = 1.0
+    return x, bands, weights / total, orbitals
+
+
+def format_band_label(label: str) -> str:
+    return normalize_high_symmetry_label(label)
 
 
 def nearest_k_label(k_value: float, ticks: list[float], labels: list[str]) -> str:
@@ -2510,6 +2757,204 @@ def format_band_gap_message(gap_info: dict[str, object]) -> str:
     )
 
 
+def contiguous_k_ranges(x: np.ndarray) -> list[slice]:
+    if len(x) < 2:
+        return [slice(0, len(x))]
+    breaks = np.where(np.diff(x) <= 1.0e-10)[0] + 1
+    starts = [0, *[int(i) for i in breaks], len(x)]
+    return [slice(starts[i], starts[i + 1]) for i in range(len(starts) - 1) if starts[i + 1] > starts[i]]
+
+
+def grouped_orbital_weights(weights: np.ndarray, orbitals: list[dict[str, object]]) -> dict[str, np.ndarray]:
+    groups: dict[str, np.ndarray] = {}
+    for idx, orbital in enumerate(orbitals):
+        label = str(orbital.get("label", ""))
+        if label not in ORBITAL_COLORS:
+            continue
+        if label not in groups:
+            groups[label] = np.zeros_like(weights[idx])
+        groups[label] += weights[idx]
+    return groups
+
+
+def load_band_plot_data(
+    root: Path,
+    explicit_file: Path | None = None,
+    explicit_kpt: Path | None = None,
+    fermi: float | None = None,
+) -> dict[str, object]:
+    band_file = find_band_file(root, explicit_file)
+    if not band_file or not band_file.is_file():
+        die(f"cannot find BANDS_*.dat or band.txt under {root}")
+    data, block_note = select_band_table_block(read_numeric_table(band_file))
+    if data.shape[1] < 3:
+        die(f"band file needs at least 3 columns: {band_file}")
+    fermi_log = None
+    if fermi is None:
+        fermi, fermi_log = find_fermi_energy(root if not root.is_file() else band_file.parent)
+    if fermi is None:
+        die("cannot determine Fermi energy from running_*.log; pass --fermi explicitly")
+    x = data[:, 1]
+    bands = data[:, 2:] - fermi
+    kpt_file = explicit_kpt or find_kpt_file(root)
+    high_symmetry_points = find_high_symmetry_points_file(root, kpt_file)
+    ticks, labels = parse_line_kpt_ticks(kpt_file, x, high_symmetry_points)
+    return {
+        "band_file": band_file,
+        "block_note": block_note,
+        "fermi": fermi,
+        "fermi_log": fermi_log,
+        "x": x,
+        "bands": bands,
+        "ticks": ticks,
+        "labels": labels,
+    }
+
+
+def load_projected_band_channels(
+    pband_file: Path | None,
+    bands_shape: tuple[int, int],
+) -> dict[str, np.ndarray]:
+    if not pband_file:
+        return {}
+    _, pband_bands, pband_weights, pband_orbitals = project_band_weights(pband_file)
+    if pband_bands.shape != bands_shape:
+        print(f"note: projected band shape {pband_bands.shape} does not match band shape {bands_shape}; band plot is monochrome")
+        return {}
+    return grouped_orbital_weights(pband_weights, pband_orbitals)
+
+
+def plot_band_axes(
+    ax,
+    x: np.ndarray,
+    bands: np.ndarray,
+    ticks: list[float],
+    labels: list[str],
+    pband_channels: dict[str, np.ndarray] | None = None,
+    linewidth: float = 0.8,
+    color: str = "C0",
+) -> None:
+    pband_channels = pband_channels or {}
+    ranges = contiguous_k_ranges(x)
+    background_color = "0.18" if pband_channels else color
+    background_alpha = 0.35 if pband_channels else 1.0
+    for i in range(bands.shape[1]):
+        for band_range in ranges:
+            if band_range.stop - band_range.start < 2:
+                continue
+            ax.plot(
+                x[band_range],
+                bands[band_range, i],
+                lw=linewidth,
+                color=background_color,
+                alpha=background_alpha,
+                zorder=1,
+            )
+    if pband_channels:
+        x_points = np.repeat(x, bands.shape[1])
+        y_points = bands.reshape(-1)
+        for orbital in ("s", "p", "d", "f", "g"):
+            values = pband_channels.get(orbital)
+            if values is None:
+                continue
+            flat = np.clip(values.reshape(-1), 0.0, 1.0)
+            mask = flat > 0.025
+            if not mask.any():
+                continue
+            sizes = 2.0 + 20.0 * flat[mask]
+            ax.scatter(
+                x_points[mask],
+                y_points[mask],
+                s=sizes,
+                c=ORBITAL_COLORS[orbital],
+                alpha=0.42,
+                marker="o",
+                linewidths=0,
+                zorder=2,
+            )
+    for pos in ticks:
+        ax.axvline(pos, lw=0.5, color="0.55")
+    ax.axhline(0.0, lw=0.8, ls="--", color="0.25")
+    if ticks and labels:
+        ax.set_xticks(ticks)
+        ax.set_xticklabels(labels)
+    ax.set_xlim(float(x[0]), float(x[-1]))
+    ax.set_xlabel("K-path")
+    ax.set_ylabel(r"Energy - $E_F$ (eV)")
+    ax.grid(False)
+
+
+def find_related_dos_root(band_root: Path) -> Path | None:
+    bases = []
+    root = band_root.parent if band_root.is_file() else band_root
+    bases.extend([root, root.parent, root.parent / "dos", root.parent / "pdos"])
+    outdir = find_abacus_outdir(root)
+    if outdir:
+        bases.extend([outdir, outdir.parent, outdir.parent.parent / "dos"])
+    seen: set[Path] = set()
+    for base in bases:
+        try:
+            resolved = base.resolve()
+        except OSError:
+            resolved = base.absolute()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if not base.exists():
+            continue
+        candidate = resolve_out_path(base)
+        if find_first_file(candidate, ["PDOS", "PDOS.dat"], ["PDOS*"]):
+            return base
+    return None
+
+
+def load_pdos_groups(
+    root: Path,
+    explicit_file: Path | None = None,
+    selectors: list[str] | None = None,
+) -> tuple[Path, np.ndarray, dict[tuple[str, str], np.ndarray]]:
+    out_root = resolve_out_path(root)
+    pdos_file = explicit_file or find_first_file(out_root, ["PDOS", "PDOS.dat"], ["PDOS*"])
+    if not pdos_file:
+        die(f"cannot find PDOS file under {out_root}")
+    energies, groups = parse_pdos_file(pdos_file)
+    selected = parse_selectors(selectors)
+    if selected:
+        groups = {key: val for key, val in groups.items() if key in selected}
+    if not groups:
+        die("selected PDOS channels are not present in the PDOS file")
+    return pdos_file, energies, groups
+
+
+def aggregate_pdos_by_orbital(groups: dict[tuple[str, str], np.ndarray]) -> dict[str, np.ndarray]:
+    aggregated: dict[str, np.ndarray] = {}
+    for (_, orbital), values in groups.items():
+        if orbital not in ORBITAL_COLORS:
+            continue
+        if orbital not in aggregated:
+            aggregated[orbital] = np.zeros_like(values)
+        aggregated[orbital] += values
+    return aggregated
+
+
+def auto_pdos_xmax(pdos_groups: dict[str, np.ndarray], energies: np.ndarray, emin: float, emax: float) -> float:
+    if not pdos_groups:
+        return 1.0
+    mask = (energies >= emin) & (energies <= emax)
+    if not mask.any():
+        mask = np.ones_like(energies, dtype=bool)
+    values = np.concatenate([np.asarray(channel)[mask].reshape(-1) for channel in pdos_groups.values()])
+    values = values[np.isfinite(values) & (values > 0.0)]
+    if values.size == 0:
+        return 1.0
+    xmax = float(values.max())
+    return max(xmax * 1.08, 1.0)
+
+
+def set_energy_ticks(ax, emin: float, emax: float) -> None:
+    ax.set_yticks(np.linspace(emin, emax, 5))
+
+
 def cmd_plot_band(args) -> None:
     os.environ.setdefault("MPLCONFIGDIR", "/tmp/abacuskit-matplotlib")
     import matplotlib
@@ -2518,46 +2963,117 @@ def cmd_plot_band(args) -> None:
     import matplotlib.pyplot as plt
 
     root = args.path.expanduser()
-    band_file = find_band_file(root, args.file)
-    if not band_file or not band_file.is_file():
-        die(f"cannot find BANDS_*.dat or band.txt under {root}")
-    data = read_numeric_table(band_file)
-    if data.shape[1] < 3:
-        die(f"band file needs at least 3 columns: {band_file}")
-    fermi = args.fermi
-    fermi_log = None
-    if fermi is None:
-        fermi, fermi_log = find_fermi_energy(root if not root.is_file() else band_file.parent)
-    if fermi is None:
-        die("cannot determine Fermi energy from running_*.log; pass --fermi explicitly")
-
-    x = data[:, 1]
-    bands = data[:, 2:] - fermi
-    ticks, labels = parse_line_kpt_ticks(args.kpt or find_kpt_file(root), x)
+    band_data = load_band_plot_data(root, args.file, args.kpt, args.fermi)
+    x = band_data["x"]
+    bands = band_data["bands"]
+    ticks = band_data["ticks"]
+    labels = band_data["labels"]
+    fermi = band_data["fermi"]
+    fermi_log = band_data["fermi_log"]
+    band_file = band_data["band_file"]
+    block_note = band_data["block_note"]
     gap_info = analyze_band_gap(bands, x, ticks, labels)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(7.0, 5.0), dpi=args.dpi)
-    for i in range(bands.shape[1]):
-        ax.plot(x, bands[:, i], lw=args.linewidth, color=args.color)
-    for pos in ticks:
-        ax.axvline(pos, lw=0.5, color="0.55")
-    ax.axhline(0.0, lw=0.8, ls="--", color="0.25")
-    if ticks and labels:
-        ax.set_xticks(ticks)
-        ax.set_xticklabels(labels)
-    ax.set_xlim(float(x[0]), float(x[-1]))
+    pband_file = args.pband_file or find_pband_file(root)
+    pband_channels = load_projected_band_channels(pband_file, bands.shape)
+    plot_band_axes(ax, x, bands, ticks, labels, pband_channels, linewidth=args.linewidth, color=args.color)
+    if not pband_channels:
+        input_info = find_input_info_file(root)
+        if pband_file is None:
+            note = "no projected band file found"
+            if input_info and "out_proj_band                  1" not in input_info.read_text(errors="ignore"):
+                note += f"; {input_info.name} shows out_proj_band=0"
+            print(f"note: {note}; band plot is monochrome")
     ax.set_ylim(args.emin, args.emax)
-    ax.set_xlabel("K-path")
-    ax.set_ylabel(r"Energy - $E_F$ (eV)")
+    set_energy_ticks(ax, args.emin, args.emax)
     title = args.title or band_file.name
     ax.set_title(title)
-    ax.grid(axis="y", alpha=0.2)
     fig.tight_layout()
     fig.savefig(args.out)
     plt.close(fig)
     source = f" from {fermi_log}" if fermi_log else ""
-    print(f"wrote BAND plot {args.out}; E_F = {fermi:.9f} eV{source}")
+    projection = f"; orbital colors from {pband_file}" if pband_channels and pband_file else ""
+    if block_note:
+        print(f"note: {block_note} in {band_file}")
+    print(f"wrote BAND plot {args.out}; E_F = {fermi:.9f} eV{source}{projection}")
     print(format_band_gap_message(gap_info))
+
+
+def cmd_plot_band_pdos(args) -> None:
+    os.environ.setdefault("MPLCONFIGDIR", "/tmp/abacuskit-matplotlib")
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    band_root = args.band_path.expanduser()
+    band_data = load_band_plot_data(band_root, args.band_file, args.kpt, args.fermi)
+    x = band_data["x"]
+    bands = band_data["bands"]
+    ticks = band_data["ticks"]
+    labels = band_data["labels"]
+    fermi = band_data["fermi"]
+    fermi_log = band_data["fermi_log"]
+    band_file = band_data["band_file"]
+    block_note = band_data["block_note"]
+    pband_file = args.pband_file or find_pband_file(band_root)
+    pband_channels = load_projected_band_channels(pband_file, bands.shape)
+
+    dos_root = args.dos_path.expanduser() if args.dos_path else find_related_dos_root(band_root)
+    if dos_root is None:
+        die(f"cannot find related PDOS directory for {band_root}; pass --dos-path")
+    pdos_file, pdos_energies, pdos_groups = load_pdos_groups(dos_root, args.pdos_file, args.select)
+    orbital_pdos = aggregate_pdos_by_orbital(pdos_groups)
+    pdos_y = pdos_energies - float(fermi)
+    pdos_xmax = float(args.pdos_max) if args.pdos_max is not None else auto_pdos_xmax(orbital_pdos, pdos_y, args.emin, args.emax)
+
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    fig, (band_ax, pdos_ax) = plt.subplots(
+        1,
+        2,
+        figsize=(9.0, 5.0),
+        dpi=args.dpi,
+        sharey=True,
+        constrained_layout=True,
+        gridspec_kw={"width_ratios": [3.2, 1.05], "wspace": 0.06},
+    )
+    plot_band_axes(
+        band_ax,
+        x,
+        bands,
+        ticks,
+        labels,
+        pband_channels,
+        linewidth=args.linewidth,
+        color=args.color,
+    )
+    band_ax.set_ylim(args.emin, args.emax)
+    set_energy_ticks(band_ax, args.emin, args.emax)
+    band_ax.set_title(args.title or band_file.name)
+
+    for orbital in ("s", "p", "d", "f", "g"):
+        values = orbital_pdos.get(orbital)
+        if values is None:
+            continue
+        pdos_ax.plot(values, pdos_y, lw=1.2, color=ORBITAL_COLORS.get(orbital), label=orbital)
+    pdos_ax.axhline(0.0, lw=0.8, ls="--", color="0.25")
+    pdos_ax.set_xlabel("PDOS")
+    pdos_ax.tick_params(axis="y", labelleft=False)
+    pdos_ax.grid(False)
+    pdos_ax.set_ylim(args.emin, args.emax)
+    pdos_ax.set_xlim(0.0, pdos_xmax)
+    if not args.no_legend and orbital_pdos:
+        pdos_ax.legend(frameon=False, fontsize=8, loc="best")
+
+    fig.savefig(args.out)
+    plt.close(fig)
+    source = f" from {fermi_log}" if fermi_log else ""
+    projection = f"; orbital colors from {pband_file}" if pband_channels and pband_file else ""
+    if block_note:
+        print(f"note: {block_note} in {band_file}")
+    print(f"wrote BAND+PDOS plot {args.out}; E_F = {float(fermi):.9f} eV{source}{projection}; PDOS from {pdos_file}")
+    print(format_band_gap_message(analyze_band_gap(bands, x, ticks, labels)))
 
 
 def cmd_plot_dos(args) -> None:
@@ -2611,7 +3127,7 @@ def cmd_plot_dos(args) -> None:
         x, xlabel = maybe_shift_fermi(energies, args.fermi)
         fig, ax = plt.subplots(figsize=(6.4, 4.2), dpi=180)
         for (species, orbital), values in sorted(groups.items()):
-            ax.plot(x, values, lw=1.2, label=f"{species}-{orbital}")
+            ax.plot(x, values, lw=1.2, color=ORBITAL_COLORS.get(orbital), label=f"{species}-{orbital}")
         ax.set_xlabel(xlabel)
         ax.set_ylabel("PDOS")
         ax.legend(frameon=False, ncol=2)
@@ -3807,11 +4323,12 @@ def interactive_plot_band() -> None:
     args = argparse.Namespace(
         path=Path("."),
         file=None,
+        pband_file=None,
         kpt=None,
         fermi=None,
         out=Path("band.png"),
-        emin=-12.0,
-        emax=8.0,
+        emin=-10.0,
+        emax=10.0,
         title=None,
         linewidth=0.8,
         color="C0",
@@ -3819,6 +4336,32 @@ def interactive_plot_band() -> None:
     )
     cmd_plot_band(args)
     print("BAND plot finished. Exiting abacuskit.")
+    raise ProgramExit
+
+
+def interactive_plot_band_pdos() -> None:
+    print("\n[24] Plot BAND + PDOS in current directory\n")
+    args = argparse.Namespace(
+        band_path=Path("."),
+        band_file=None,
+        dos_path=None,
+        pdos_file=None,
+        pband_file=None,
+        kpt=None,
+        select=None,
+        fermi=None,
+        out=Path("band_pdos.png"),
+        emin=-10.0,
+        emax=10.0,
+        title=None,
+        linewidth=0.8,
+        color="C0",
+        dpi=300,
+        no_legend=False,
+        pdos_max=None,
+    )
+    cmd_plot_band_pdos(args)
+    print("BAND+PDOS plot finished. Exiting abacuskit.")
     raise ProgramExit
 
 
@@ -4246,6 +4789,7 @@ Affiliation: {__affiliation__}
   22) Init workflow skeleton
 
   23) Search/save APNS pseudopotential and orbital paths
+  24) Plot BAND + PDOS in current directory
   h) Show command-line help
   q) Quit abacuskit
   0) Exit
@@ -4278,6 +4822,7 @@ def interactive_menu() -> None:
         "21": interactive_make_train,
         "22": interactive_init_workflow,
         "23": interactive_config_apns_paths,
+        "24": interactive_plot_band_pdos,
     }
     while True:
         print_interactive_menu()
@@ -4504,16 +5049,37 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("plot-band", help="plot ABACUS BANDS_*.dat and shift Fermi level to 0 eV")
     p.add_argument("path", type=Path, help="ABACUS job directory, OUT.* directory, or BANDS_*.dat file")
     p.add_argument("--file", type=Path, help="explicit BANDS_*.dat file")
+    p.add_argument("--pband-file", type=Path, help="explicit projected band XML file, e.g. pbands1.xml")
     p.add_argument("--kpt", type=Path, help="explicit line-mode KPT file for high-symmetry labels")
     p.add_argument("--fermi", type=float, help="explicit Fermi energy in eV; default reads running_*.log")
     p.add_argument("--out", type=Path, default=Path("band.png"))
-    p.add_argument("--emin", type=float, default=-12.0, help="minimum plotted energy after Fermi shift")
-    p.add_argument("--emax", type=float, default=8.0, help="maximum plotted energy after Fermi shift")
+    p.add_argument("--emin", type=float, default=-10.0, help="minimum plotted energy after Fermi shift")
+    p.add_argument("--emax", type=float, default=10.0, help="maximum plotted energy after Fermi shift")
     p.add_argument("--title", help="plot title")
     p.add_argument("--linewidth", type=float, default=0.8)
     p.add_argument("--color", default="C0")
     p.add_argument("--dpi", type=int, default=300)
     p.set_defaults(func=cmd_plot_band)
+
+    p = sub.add_parser("plot-band-pdos", help="plot band structure with vertical PDOS")
+    p.add_argument("band_path", type=Path, help="ABACUS band job directory, OUT.* directory, or BANDS_*.dat file")
+    p.add_argument("--band-file", type=Path, help="explicit BANDS_*.dat or band.txt file")
+    p.add_argument("--dos-path", type=Path, help="ABACUS DOS/PDOS job directory or OUT.* directory")
+    p.add_argument("--pdos-file", type=Path, help="explicit PDOS file")
+    p.add_argument("--pband-file", type=Path, help="explicit projected band XML file, e.g. pbands1.xml")
+    p.add_argument("--kpt", type=Path, help="explicit line-mode KPT file for high-symmetry labels")
+    p.add_argument("--select", action="append", help="PDOS selector, e.g. C=p --select H=s --select O=p --select Ni=d")
+    p.add_argument("--fermi", type=float, help="explicit Fermi energy in eV; default reads running_*.log")
+    p.add_argument("--out", type=Path, default=Path("band_pdos.png"))
+    p.add_argument("--emin", type=float, default=-10.0, help="minimum plotted energy after Fermi shift")
+    p.add_argument("--emax", type=float, default=10.0, help="maximum plotted energy after Fermi shift")
+    p.add_argument("--title", help="plot title")
+    p.add_argument("--linewidth", type=float, default=0.8)
+    p.add_argument("--color", default="C0")
+    p.add_argument("--dpi", type=int, default=300)
+    p.add_argument("--no-legend", action="store_true", help="hide PDOS legend")
+    p.add_argument("--pdos-max", type=float, help="manual PDOS x-axis maximum; default auto-scales from plotted window")
+    p.set_defaults(func=cmd_plot_band_pdos)
 
     p = sub.add_parser("cohp-orbitals", help="list atom shell channels and global NAO ranges for COHP")
     p.add_argument("out_dir", type=Path, nargs="?", default=Path("OUT.ABACUS"))

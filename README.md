@@ -4,9 +4,15 @@
 
 `abacuskit` 是一个集成式 ABACUS + DeepMD 命令行程序，用于生成 ABACUS 输入文件、准备批量任务、检查/汇总计算结果，并把 ABACUS 输出转换为 DeepMD 数据。
 
-- Version: v1.2.3
+- Version: v1.2.4
 - Author: Han Enci, Zhong Lisheng, Yu Yutong, Xu Mengting, Chen Jingyuan
 - Affiliation: Xi'an University of Technology
+
+## v1.2.4 更新记录
+
+- 新增投影能带绘图：自动读取 `pbands1.xml`，按 `s/p/d/f/g` 轨道给 band 着色，并保持高对称路径断点不被错误直连。
+- 新增 BAND+PDOS 联合绘图：左侧 BAND、右侧竖向 PDOS，共享 `Energy - E_F` 纵轴，轨道颜色与投影能带一致。
+- BAND+PDOS 默认纵轴范围调整为 `-10` 到 `10` eV，PDOS 横向强度按当前能量窗口自动缩放，并支持 `--pdos-max` 手动指定。
 
 ## v1.2.3 更新记录
 
@@ -113,6 +119,7 @@ abacuskit
 22   Init workflow skeleton
 
 23   Search/save APNS pseudopotential and orbital paths
+24   Plot BAND + PDOS in current directory
 ```
 
 常用的 CIF 转 STRU 菜单流程：
@@ -514,7 +521,7 @@ abacuskit report-metrics \
 
 ## 10. 绘制 BAND / DOS / PDOS / LDOS
 
-ABACUS 的能带文件通常是 `OUT.<suffix>/BANDS_1.dat`。`abacuskit` 会自动读取 `running_*.log` 里的 `EFERMI` / `E_Fermi`，将费米能级平移到 0 eV，并尽量从 line-mode `KPT` 自动生成高对称点标签。默认绘图区间是 `-12` 到 `8` eV，以保留费米能级附近细节；出图后会直接输出带隙值，并判断直接带隙或间接带隙。
+ABACUS 的能带文件通常是 `OUT.<suffix>/BANDS_1.dat`。`abacuskit` 会自动读取 `running_*.log` 里的 `EFERMI` / `E_Fermi`，将费米能级平移到 0 eV，并尽量从 line-mode `KPT` 自动生成高对称点标签。默认绘图区间是 `-12` 到 `8` eV，以保留费米能级附近细节；出图后会直接输出带隙值，并判断直接带隙或间接带隙。若同目录存在 `pbands1.xml`，会按 `s/p/d/f` 轨道给 band 着色；没有投影文件时则画单色 band。
 
 ```bash
 abacuskit plot-band band \
@@ -549,6 +556,8 @@ abacuskit plot-dos OUT.ABACUS \
 ```
 
 LDOS 支持 ABACUS 的 `LDOS.txt` 线扫描文件；如果输出的是 `LDOS_*eV.cube`，脚本会自动画 cube 中间切片。菜单里输入 `11` 可以交互式绘制 DOS、PDOS 或 LDOS。
+
+BAND+PDOS 联合图使用 `plot-band-pdos`，默认纵轴范围为 `-10` 到 `10` eV，PDOS 横向强度会按当前能量窗口自动缩放。
 
 ## 11. 绘制 ELF / 电荷密度 / 电荷密度差
 
