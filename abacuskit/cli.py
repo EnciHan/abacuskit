@@ -3277,6 +3277,20 @@ def find_grid_file(root: Path, kind: str) -> Path | None:
 BOHR_TO_ANGSTROM = 0.529177210903
 ELF_DEFAULT_LEVELS = [0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.85]
 ELF_COLORBAR_TICKS = [round(0.1 * i, 1) for i in range(11)]
+ELF_REFERENCE_CMAP = "abacuskit_elf_reference"
+ELF_REFERENCE_COLORS = [
+    (0.0, "#220044"),
+    (0.1, "#1100ff"),
+    (0.2, "#0050ff"),
+    (0.3, "#00b4ff"),
+    (0.4, "#00ffea"),
+    (0.5, "#00ff52"),
+    (0.6, "#62ff00"),
+    (0.7, "#c8ff00"),
+    (0.8, "#ffcc00"),
+    (0.9, "#ff6600"),
+    (1.0, "#ff0000"),
+]
 ELEMENT_PLOT_COLORS = {
     "H": "#f7f7f7",
     "C": "#444444",
@@ -3292,6 +3306,14 @@ def atomic_symbol_from_z(z_number: int) -> str:
     if 0 <= z_number < len(chemical_symbols) and chemical_symbols[z_number]:
         return chemical_symbols[z_number]
     return str(z_number)
+
+
+def resolve_elf_cmap(cmap: str):
+    if cmap != ELF_REFERENCE_CMAP:
+        return cmap
+    from matplotlib.colors import LinearSegmentedColormap
+
+    return LinearSegmentedColormap.from_list(ELF_REFERENCE_CMAP, ELF_REFERENCE_COLORS)
 
 
 def parse_elf_levels(value: str | int | float | None, default: list[float] | None = None) -> list[float]:
@@ -3586,12 +3608,13 @@ def plot_elf_plane_map(
 
     out.parent.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(5.4, 6.6), dpi=300)
+    cmap_obj = resolve_elf_cmap(cmap)
     if style == "contour":
-        mappable = ax.contour(u_grid, v_grid, elf, levels=levels, cmap=cmap, vmin=0.0, vmax=1.0, linewidths=1.25)
+        mappable = ax.contour(u_grid, v_grid, elf, levels=levels, cmap=cmap_obj, vmin=0.0, vmax=1.0, linewidths=1.25)
         ticks = levels
     else:
         fill_levels = np.linspace(0.0, 1.0, 41)
-        mappable = ax.contourf(u_grid, v_grid, elf, levels=fill_levels, cmap=cmap, vmin=0.0, vmax=1.0)
+        mappable = ax.contourf(u_grid, v_grid, elf, levels=fill_levels, cmap=cmap_obj, vmin=0.0, vmax=1.0)
         ax.contour(u_grid, v_grid, elf, levels=levels, colors="white", linewidths=0.7, alpha=0.9)
         ticks = ELF_COLORBAR_TICKS
     draw_elf_projected_atoms(ax, projected_atoms, selected_atoms)
@@ -3633,9 +3656,10 @@ def plot_elf_interpolation_compare(
     out.parent.mkdir(parents=True, exist_ok=True)
     fig, axes_plot = plt.subplots(1, 3, figsize=(12.6, 4.8), dpi=240, sharex=True, sharey=True)
     im = None
+    cmap_obj = resolve_elf_cmap(cmap)
     for ax, (label, order) in zip(axes_plot, [("Nearest grid", 0), ("Linear interpolation", 1), ("Cubic interpolation", 3)]):
         u_grid, v_grid, elf = sample_cube_on_plane(values, origin, axes, shape, plane_origin, e_u, e_v, u_range, v_range, size, order)
-        im = ax.contourf(u_grid, v_grid, elf, levels=np.linspace(0.0, 1.0, 41), cmap=cmap, vmin=0.0, vmax=1.0)
+        im = ax.contourf(u_grid, v_grid, elf, levels=np.linspace(0.0, 1.0, 41), cmap=cmap_obj, vmin=0.0, vmax=1.0)
         ax.contour(u_grid, v_grid, elf, levels=levels, colors="white", linewidths=0.45, alpha=0.8)
         draw_elf_projected_atoms(ax, projected_atoms, selected_atoms)
         ax.set_title(label, fontsize=10)
@@ -3738,15 +3762,16 @@ def plot_grid_slice(
     out.parent.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(6.4, 4.8), dpi=180)
     data = plane.T
+    cmap_obj = resolve_elf_cmap(cmap) if label == "ELF" else cmap
     if style == "image":
-        mappable = ax.imshow(data, origin="lower", aspect="auto", cmap=cmap, vmin=vmin, vmax=vmax)
+        mappable = ax.imshow(data, origin="lower", aspect="auto", cmap=cmap_obj, vmin=vmin, vmax=vmax)
     else:
         x = np.arange(data.shape[1])
         y = np.arange(data.shape[0])
         xx, yy = np.meshgrid(x, y)
         contour_levels = grid_contour_levels(data, levels, vmin, vmax)
         if style in {"contourf", "both"}:
-            mappable = ax.contourf(xx, yy, data, levels=contour_levels, cmap=cmap, extend="both")
+            mappable = ax.contourf(xx, yy, data, levels=contour_levels, cmap=cmap_obj, extend="both")
         else:
             mappable = ax.contour(xx, yy, data, levels=contour_levels, colors=contour_color, linewidths=0.8)
             ax.clabel(mappable, inline=True, fontsize=7, fmt="%.2g")
@@ -3754,7 +3779,8 @@ def plot_grid_slice(
             line_levels = contour_levels
             contours = ax.contour(xx, yy, data, levels=line_levels, colors=contour_color, linewidths=0.35)
             ax.clabel(contours, inline=True, fontsize=7, fmt="%.2g")
-    fig.colorbar(mappable, ax=ax, label=label)
+    ticks = ELF_COLORBAR_TICKS if label == "ELF" else None
+    fig.colorbar(mappable, ax=ax, label=label, ticks=ticks)
     ax.set_xlabel("grid")
     ax.set_ylabel("grid")
     ax.set_title(title or f"{label}, {axis} slice {used_index}")
@@ -3807,7 +3833,7 @@ def cmd_plot_grid(args) -> None:
             die(f"cannot find {kind} cube under {root}")
         _, values = read_cube_grid(cube_file)
         label = "ELF" if kind == "elf" else "Charge density" if kind == "charge" else cube_file.name
-        cmap = args.cmap or ("viridis" if kind == "elf" else "magma")
+        cmap = args.cmap or (ELF_REFERENCE_CMAP if kind == "elf" else "magma")
 
     plot_grid_slice(
         values,
@@ -3834,7 +3860,7 @@ def cmd_plot_elf(args) -> None:
         args.minus_file = None
         args.cube_out = None
         if args.cmap is None:
-            args.cmap = "viridis"
+            args.cmap = ELF_REFERENCE_CMAP
         args.levels = 16 if getattr(args, "levels", None) is None else parse_elf_levels(args.levels, None)
         if getattr(args, "out", None) is None:
             prefix = getattr(args, "out_prefix", None) or Path("elf")
@@ -3849,7 +3875,7 @@ def cmd_plot_elf(args) -> None:
     prefix.parent.mkdir(parents=True, exist_ok=True)
     levels = parse_elf_levels(args.levels, ELF_DEFAULT_LEVELS)
     size = parse_elf_size(args.size)
-    cmap = args.cmap or "viridis"
+    cmap = args.cmap or ELF_REFERENCE_CMAP
     summary_lines = [
         f"ELF mode: {mode}",
         f"cube: {cube_file}",
@@ -6008,7 +6034,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--levels", help="contour levels, e.g. 0.2,0.3,0.4,0.5,0.7,0.85; grid mode also accepts a count")
     p.add_argument("--vmin", type=float, default=0.0, help="minimum plotted ELF value")
     p.add_argument("--vmax", type=float, default=1.0, help="maximum plotted ELF value")
-    p.add_argument("--cmap", default="viridis", help="matplotlib colormap name")
+    p.add_argument("--cmap", help="matplotlib colormap name")
     p.add_argument("--title", help="plot title")
     p.add_argument("--contour-color", default="black", help="contour line color for contour/both styles")
     p.add_argument("--atom", help="atom selector for line/bond-plane, e.g. 97 or H:97")
