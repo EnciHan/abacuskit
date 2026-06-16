@@ -3034,8 +3034,8 @@ def cmd_plot_band(args) -> None:
             print(f"note: {note}; band plot is monochrome")
     ax.set_ylim(args.emin, args.emax)
     set_energy_ticks(ax, args.emin, args.emax)
-    title = args.title or band_file.name
-    ax.set_title(title)
+    if args.title:
+        ax.set_title(args.title)
     fig.tight_layout()
     fig.savefig(args.out)
     plt.close(fig)
@@ -3097,7 +3097,8 @@ def cmd_plot_band_pdos(args) -> None:
     )
     band_ax.set_ylim(args.emin, args.emax)
     set_energy_ticks(band_ax, args.emin, args.emax)
-    band_ax.set_title(args.title or band_file.name)
+    if args.title:
+        band_ax.set_title(args.title)
 
     for orbital in ("s", "p", "d", "f", "g"):
         values = orbital_pdos.get(orbital)
