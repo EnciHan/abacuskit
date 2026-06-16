@@ -5165,11 +5165,15 @@ def default_plot_elf_args() -> argparse.Namespace:
     )
 
 
+def parse_interactive_atom_selectors(text: str, count: int, example: str) -> list[str]:
+    selectors = [item for item in re.split(r"[,;\s]+", text.strip()) if item]
+    if len(selectors) != count:
+        die(f"please enter exactly {count} atom selector(s), e.g. {example}")
+    return selectors
+
+
 def interactive_elf_list_atoms() -> None:
     args = default_plot_elf_args()
-    args.path = prompt_path("ABACUS job, OUT.* directory, or elf.cube", ".")
-    file_text = prompt_text("Explicit elf.cube file, empty for auto", "")
-    args.file = Path(file_text).expanduser() if file_text else None
     cube_file = resolve_elf_cube(args.path, args.file)
     _, atoms, _, _, _, _ = read_cube_grid_with_atoms(cube_file)
     print(f"\nAtoms in {cube_file}:")
@@ -5182,15 +5186,11 @@ def interactive_elf_list_atoms() -> None:
 def interactive_elf_grid_slice() -> None:
     args = default_plot_elf_args()
     args.mode = "grid"
-    args.path = prompt_path("ABACUS job, OUT.* directory, or elf.cube", ".")
-    file_text = prompt_text("Explicit elf.cube file, empty for auto", "")
-    args.file = Path(file_text).expanduser() if file_text else None
     args.axis = prompt_choice("Slice axis", ["z", "x", "y"], "z")
     index_text = prompt_text("Slice index, empty for middle", "")
     args.index = int(index_text) if index_text else None
-    args.style = prompt_choice("Plot style", ["contourf", "contour", "both", "image"], "contourf")
-    args.levels = prompt_text("Contour levels or count", "0.2,0.3,0.4,0.5,0.6,0.7,0.85")
-    args.out = prompt_path("Output image", "elf.png")
+    args.levels = "0.2,0.3,0.4,0.5,0.6,0.7,0.85"
+    args.out = Path("elf.png")
     cmd_plot_elf(args)
     print("ELF grid-slice plot finished. Exiting abacuskit.")
     raise ProgramExit
@@ -5199,13 +5199,10 @@ def interactive_elf_grid_slice() -> None:
 def interactive_elf_line_profile() -> None:
     args = default_plot_elf_args()
     args.mode = "line"
-    args.path = prompt_path("ABACUS job, OUT.* directory, or elf.cube", ".")
-    file_text = prompt_text("Explicit elf.cube file, empty for auto", "")
-    args.file = Path(file_text).expanduser() if file_text else None
-    args.atom = prompt_text("First atom, e.g. Cu:20 or 20")
-    args.neighbor = prompt_text("Second atom, e.g. H:97, auto, or Cu:auto", "auto")
-    args.line_points = prompt_int("Line profile points", 320)
-    args.out_prefix = prompt_path("Output prefix", "elf_line")
+    atom_a, atom_b = parse_interactive_atom_selectors(prompt_text("Two atoms, e.g. Cu:20,H:97 or 20 97"), 2, "Cu:20,H:97")
+    args.atom = atom_a
+    args.neighbor = atom_b
+    args.out_prefix = Path("elf_line")
     cmd_plot_elf(args)
     print("ELF line profile finished. Exiting abacuskit.")
     raise ProgramExit
@@ -5214,17 +5211,13 @@ def interactive_elf_line_profile() -> None:
 def interactive_elf_bond_plane() -> None:
     args = default_plot_elf_args()
     args.mode = "bond-plane"
-    args.path = prompt_path("ABACUS job, OUT.* directory, or elf.cube", ".")
-    file_text = prompt_text("Explicit elf.cube file, empty for auto", "")
-    args.file = Path(file_text).expanduser() if file_text else None
-    args.atom = prompt_text("Center atom, e.g. H:97 or 97")
-    args.neighbor = prompt_text("Bond neighbor, e.g. Cu:auto, auto, or Cu:20", "auto")
-    args.surface_axis = prompt_choice("Surface normal axis", ["z", "x", "y"], "z")
-    args.profile = prompt_yes_no("Also write atom-to-atom ELF profile", True)
-    args.compare_interp = prompt_yes_no("Also write nearest/linear/cubic interpolation comparison", True)
-    args.interp = prompt_choice("Plane interpolation", ["linear", "nearest", "cubic"], "linear")
-    args.levels = prompt_text("Contour levels", "0.2,0.3,0.4,0.5,0.6,0.7,0.85")
-    args.out_prefix = prompt_path("Output prefix", "elf_bond_plane")
+    center, neighbor = parse_interactive_atom_selectors(prompt_text("Center atom and neighbor, e.g. H:97,Cu:auto or H:97 Cu:20"), 2, "H:97,Cu:auto")
+    args.atom = center
+    args.neighbor = neighbor
+    args.profile = True
+    args.compare_interp = True
+    args.levels = "0.2,0.3,0.4,0.5,0.6,0.7,0.85"
+    args.out_prefix = Path("elf_bond_plane")
     cmd_plot_elf(args)
     print("ELF bond-plane plot finished. Exiting abacuskit.")
     raise ProgramExit
@@ -5233,14 +5226,11 @@ def interactive_elf_bond_plane() -> None:
 def interactive_elf_atoms_plane() -> None:
     args = default_plot_elf_args()
     args.mode = "atoms-plane"
-    args.path = prompt_path("ABACUS job, OUT.* directory, or elf.cube", ".")
-    file_text = prompt_text("Explicit elf.cube file, empty for auto", "")
-    args.file = Path(file_text).expanduser() if file_text else None
-    args.atoms = prompt_text("Three atoms, e.g. H:97,Cu:20,O:68")
-    args.compare_interp = prompt_yes_no("Also write nearest/linear/cubic interpolation comparison", True)
-    args.interp = prompt_choice("Plane interpolation", ["linear", "nearest", "cubic"], "linear")
-    args.levels = prompt_text("Contour levels", "0.2,0.3,0.4,0.5,0.6,0.7,0.85")
-    args.out_prefix = prompt_path("Output prefix", "elf_atoms_plane")
+    atoms = parse_interactive_atom_selectors(prompt_text("Three atoms, e.g. H:97,Cu:20,O:68 or 97 20 68"), 3, "H:97,Cu:20,O:68")
+    args.atoms = ",".join(atoms)
+    args.compare_interp = True
+    args.levels = "0.2,0.3,0.4,0.5,0.6,0.7,0.85"
+    args.out_prefix = Path("elf_atoms_plane")
     cmd_plot_elf(args)
     print("ELF atoms-plane plot finished. Exiting abacuskit.")
     raise ProgramExit
@@ -5252,9 +5242,9 @@ def interactive_plot_elf() -> None:
 ---------- 100x: Plot ELF ----------
   1000) List atom indices from elf.cube
   1001) Grid slice: normal x/y/z cube slice
-  1002) 1D ELF curve between two atoms
-  1003) 2D bond-plane: parallel to a bond and normal to a surface plane
-  1004) 2D atoms-plane: plane defined by three atoms
+  1002) 1D ELF curve: enter two atoms only
+  1003) 2D bond-plane: enter center atom and neighbor only
+  1004) 2D atoms-plane: enter three atoms only
   0) Back to previous menu
   q) Quit abacuskit
 """
