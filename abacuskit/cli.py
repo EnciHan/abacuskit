@@ -3274,7 +3274,42 @@ def find_grid_file(root: Path, kind: str) -> Path | None:
     return find_first_file(root, [], ["*.cube"])
 
 
-def plot_grid_slice(values: np.ndarray, out: Path, label: str, axis: str, index: int | None, cmap: str) -> None:
+def grid_contour_levels(
+    plane: np.ndarray,
+    count: int,
+    vmin: float | None = None,
+    vmax: float | None = None,
+) -> np.ndarray:
+    if count < 2:
+        die("--levels must be at least 2")
+    finite = plane[np.isfinite(plane)]
+    if finite.size == 0:
+        die("grid slice has no finite values")
+    low = float(vmin) if vmin is not None else float(finite.min())
+    high = float(vmax) if vmax is not None else float(finite.max())
+    if low > high:
+        die("--vmin cannot be larger than --vmax")
+    if math.isclose(low, high, rel_tol=0.0, abs_tol=1.0e-14):
+        pad = max(abs(low) * 1.0e-6, 1.0e-6)
+        low -= pad
+        high += pad
+    return np.linspace(low, high, count)
+
+
+def plot_grid_slice(
+    values: np.ndarray,
+    out: Path,
+    label: str,
+    axis: str,
+    index: int | None,
+    cmap: str,
+    style: str = "image",
+    levels: int = 16,
+    vmin: float | None = None,
+    vmax: float | None = None,
+    title: str | None = None,
+    contour_color: str = "black",
+) -> None:
     os.environ.setdefault("MPLCONFIGDIR", "/tmp/abacuskit-matplotlib")
     import matplotlib
 
@@ -3284,11 +3319,27 @@ def plot_grid_slice(values: np.ndarray, out: Path, label: str, axis: str, index:
     plane, used_index = cube_midplane(values, axis, index)
     out.parent.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(6.4, 4.8), dpi=180)
-    im = ax.imshow(plane.T, origin="lower", aspect="auto", cmap=cmap)
-    fig.colorbar(im, ax=ax, label=label)
+    data = plane.T
+    if style == "image":
+        mappable = ax.imshow(data, origin="lower", aspect="auto", cmap=cmap, vmin=vmin, vmax=vmax)
+    else:
+        x = np.arange(data.shape[1])
+        y = np.arange(data.shape[0])
+        xx, yy = np.meshgrid(x, y)
+        contour_levels = grid_contour_levels(data, levels, vmin, vmax)
+        if style in {"contourf", "both"}:
+            mappable = ax.contourf(xx, yy, data, levels=contour_levels, cmap=cmap, extend="both")
+        else:
+            mappable = ax.contour(xx, yy, data, levels=contour_levels, colors=contour_color, linewidths=0.8)
+            ax.clabel(mappable, inline=True, fontsize=7, fmt="%.2g")
+        if style == "both":
+            line_levels = contour_levels
+            contours = ax.contour(xx, yy, data, levels=line_levels, colors=contour_color, linewidths=0.35)
+            ax.clabel(contours, inline=True, fontsize=7, fmt="%.2g")
+    fig.colorbar(mappable, ax=ax, label=label)
     ax.set_xlabel("grid")
     ax.set_ylabel("grid")
-    ax.set_title(f"{label}, {axis} slice {used_index}")
+    ax.set_title(title or f"{label}, {axis} slice {used_index}")
     fig.tight_layout()
     fig.savefig(out)
     plt.close(fig)
@@ -3340,8 +3391,31 @@ def cmd_plot_grid(args) -> None:
         label = "ELF" if kind == "elf" else "Charge density" if kind == "charge" else cube_file.name
         cmap = args.cmap or ("viridis" if kind == "elf" else "magma")
 
-    plot_grid_slice(values, args.out, label, args.axis, args.index, cmap)
+    plot_grid_slice(
+        values,
+        args.out,
+        label,
+        args.axis,
+        args.index,
+        cmap,
+        style=getattr(args, "style", "image"),
+        levels=getattr(args, "levels", 16),
+        vmin=getattr(args, "vmin", None),
+        vmax=getattr(args, "vmax", None),
+        title=getattr(args, "title", None),
+        contour_color=getattr(args, "contour_color", "black"),
+    )
     print(f"wrote {label} plot {args.out}")
+
+
+def cmd_plot_elf(args) -> None:
+    args.kind = "elf"
+    args.minus = None
+    args.minus_file = None
+    args.cube_out = None
+    if args.cmap is None:
+        args.cmap = "viridis"
+    cmd_plot_grid(args)
 
 
 def infer_type_map_from_data(paths: list[Path]) -> list[str]:
@@ -4424,6 +4498,12 @@ def run_interactive_plot_grid(kind: str, default_out: str) -> None:
         axis="z",
         index=None,
         cmap=None,
+        style="contourf" if kind == "elf" else "image",
+        levels=16,
+        vmin=0.0 if kind == "elf" else None,
+        vmax=1.0 if kind == "elf" else None,
+        title=None,
+        contour_color="black",
         out=Path(default_out),
     )
     if kind == "diff":
@@ -5168,8 +5248,29 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--axis", choices=["x", "y", "z"], default="z")
     p.add_argument("--index", type=int, help="slice index; default is the middle slice")
     p.add_argument("--cmap", help="matplotlib colormap name")
+    p.add_argument("--style", choices=["image", "contour", "contourf", "both"], default="image", help="2D slice style")
+    p.add_argument("--levels", type=int, default=16, help="number of contour levels for contour/contourf/both")
+    p.add_argument("--vmin", type=float, help="minimum plotted value for color scale/contour levels")
+    p.add_argument("--vmax", type=float, help="maximum plotted value for color scale/contour levels")
+    p.add_argument("--title", help="plot title")
+    p.add_argument("--contour-color", default="black", help="contour line color for contour/both styles")
     p.add_argument("--out", type=Path, required=True)
     p.set_defaults(func=cmd_plot_grid)
+
+    p = sub.add_parser("plot-elf", help="plot 2D ELF cube slices as contour or filled contour maps")
+    p.add_argument("path", type=Path, help="ABACUS job directory, OUT.* directory, or ELF cube file")
+    p.add_argument("--file", type=Path, help="explicit ELF cube file")
+    p.add_argument("--axis", choices=["x", "y", "z"], default="z")
+    p.add_argument("--index", type=int, help="slice index; default is the middle slice")
+    p.add_argument("--style", choices=["contourf", "contour", "both", "image"], default="contourf", help="ELF 2D plot style")
+    p.add_argument("--levels", type=int, default=16, help="number of contour levels")
+    p.add_argument("--vmin", type=float, default=0.0, help="minimum plotted ELF value")
+    p.add_argument("--vmax", type=float, default=1.0, help="maximum plotted ELF value")
+    p.add_argument("--cmap", default="viridis", help="matplotlib colormap name")
+    p.add_argument("--title", help="plot title")
+    p.add_argument("--contour-color", default="black", help="contour line color for contour/both styles")
+    p.add_argument("--out", type=Path, required=True)
+    p.set_defaults(func=cmd_plot_elf)
 
     p = sub.add_parser("bader", help="calculate Bader charges from ABACUS charge-density cube output")
     p.add_argument("path", type=Path, nargs="?", default=Path("."), help="ABACUS job directory, OUT.* directory, or cube file")
