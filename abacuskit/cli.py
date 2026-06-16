@@ -27,7 +27,7 @@ from typing import Iterable
 
 import numpy as np
 from ase import Atoms
-from ase.data import atomic_masses, atomic_numbers
+from ase.data import atomic_masses, atomic_numbers, chemical_symbols
 from ase.io import read, write
 
 try:
@@ -3274,12 +3274,62 @@ def find_grid_file(root: Path, kind: str) -> Path | None:
     return find_first_file(root, [], ["*.cube"])
 
 
+BOHR_TO_ANGSTROM = 0.529177210903
+ELF_DEFAULT_LEVELS = [0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.85]
+ELEMENT_PLOT_COLORS = {
+    "H": "#f7f7f7",
+    "C": "#444444",
+    "N": "#3b70d8",
+    "O": "#d6453d",
+    "S": "#f1c232",
+    "Si": "#b9a07a",
+    "Cu": "#b87333",
+}
+
+
+def atomic_symbol_from_z(z_number: int) -> str:
+    if 0 <= z_number < len(chemical_symbols) and chemical_symbols[z_number]:
+        return chemical_symbols[z_number]
+    return str(z_number)
+
+
+def parse_elf_levels(value: str | int | float | None, default: list[float] | None = None) -> list[float]:
+    if value is None:
+        return list(default or ELF_DEFAULT_LEVELS)
+    if isinstance(value, (int, float)):
+        count = int(value)
+        if count < 2:
+            die("--levels must be at least 2")
+        return list(np.linspace(0.0, 1.0, count))
+    text = str(value).strip()
+    if not text:
+        return list(default or ELF_DEFAULT_LEVELS)
+    if "," in text or ";" in text or " " in text:
+        items = [item for item in re.split(r"[,;\s]+", text) if item]
+        levels = sorted(float(item) for item in items)
+        if not levels:
+            die("empty --levels value")
+        return levels
+    try:
+        count = int(text)
+    except ValueError:
+        return [float(text)]
+    if count < 2:
+        die("--levels must be at least 2")
+    return list(np.linspace(0.0, 1.0, count))
+
+
 def grid_contour_levels(
     plane: np.ndarray,
-    count: int,
+    count: int | list[float] | np.ndarray,
     vmin: float | None = None,
     vmax: float | None = None,
 ) -> np.ndarray:
+    if isinstance(count, (list, tuple, np.ndarray)):
+        levels = np.array(count, dtype=float)
+        if levels.size < 1:
+            die("empty contour level list")
+        return levels
     if count < 2:
         die("--levels must be at least 2")
     finite = plane[np.isfinite(plane)]
@@ -3294,6 +3344,373 @@ def grid_contour_levels(
         low -= pad
         high += pad
     return np.linspace(low, high, count)
+
+
+def read_cube_grid_with_atoms(path: Path) -> tuple[list[str], list[dict[str, object]], np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    with path.open(errors="ignore") as handle:
+        header = [next(handle).rstrip("\n") for _ in range(6)]
+        if len(header) < 6:
+            die(f"cube file too short: {path}")
+        natoms = abs(int(float(header[2].split()[0])))
+        origin = np.array([float(x) for x in header[2].split()[1:4]], dtype=float)
+        shape: list[int] = []
+        axes: list[list[float]] = []
+        raw_counts: list[int] = []
+        for line in header[3:6]:
+            parts = line.split()
+            count = int(float(parts[0]))
+            raw_counts.append(count)
+            shape.append(abs(count))
+            axes.append([float(x) for x in parts[1:4]])
+        unit_to_bohr = 1.0 / BOHR_TO_ANGSTROM if any(count < 0 for count in raw_counts) else 1.0
+        origin = origin * unit_to_bohr
+        axes_array = np.array(axes, dtype=float) * unit_to_bohr
+        atoms: list[dict[str, object]] = []
+        for idx in range(1, natoms + 1):
+            parts = next(handle).split()
+            z_number = int(float(parts[0]))
+            atoms.append(
+                {
+                    "idx": idx,
+                    "z": z_number,
+                    "symbol": atomic_symbol_from_z(z_number),
+                    "pos": np.array([float(x) for x in parts[2:5]], dtype=float) * unit_to_bohr,
+                }
+            )
+        need = int(np.prod(shape))
+        values = np.fromstring(handle.read(), sep=" ", dtype=float, count=need)
+    if values.size < int(np.prod(shape)):
+        die(f"cube file has {values.size} values, expected {int(np.prod(shape))}: {path}")
+    shape_array = np.array(shape, dtype=int)
+    return header + [], atoms, origin, axes_array, shape_array, np.clip(values.reshape(tuple(shape)), 0.0, 1.0)
+
+
+def resolve_elf_cube(path: Path, explicit_file: Path | None = None) -> Path:
+    root = resolve_out_path(path.expanduser())
+    if explicit_file:
+        cube = explicit_file.expanduser()
+    elif root.is_file():
+        cube = root
+    else:
+        cube = find_grid_file(root, "elf")
+    if not cube or not cube.is_file():
+        die(f"cannot find ELF cube under {root}")
+    return cube
+
+
+def parse_elf_atom_selector(text: str, atoms: list[dict[str, object]]) -> dict[str, object]:
+    selector = text.strip()
+    if not selector:
+        die("empty atom selector")
+    if ":" in selector:
+        symbol, index_text = selector.split(":", 1)
+        symbol = symbol.strip()
+        index_text = index_text.strip()
+        if index_text.lower() == "auto":
+            matches = [atom for atom in atoms if str(atom["symbol"]).lower() == symbol.lower()]
+            if len(matches) != 1:
+                die(f"selector {selector!r} matched {len(matches)} atoms; use Element:index")
+            return matches[0]
+        index = int(index_text)
+    else:
+        symbol = ""
+        index = int(selector)
+    for atom in atoms:
+        if int(atom["idx"]) != index:
+            continue
+        if symbol and str(atom["symbol"]).lower() != symbol.lower():
+            die(f"atom {index} is {atom['symbol']}, not {symbol}")
+        return atom
+    die(f"cannot find atom selector {selector!r}")
+
+
+def cell_vectors_from_cube_axes(axes: np.ndarray, shape: np.ndarray) -> np.ndarray:
+    return np.vstack([axes[i] * int(shape[i]) for i in range(3)])
+
+
+def find_nearest_elf_neighbor(
+    center: dict[str, object],
+    atoms: list[dict[str, object]],
+    cell: np.ndarray,
+    element: str | None = None,
+) -> dict[str, object]:
+    center_pos = np.asarray(center["pos"], dtype=float)
+    best: dict[str, object] | None = None
+    for atom in atoms:
+        if int(atom["idx"]) == int(center["idx"]):
+            continue
+        if element and str(atom["symbol"]).lower() != element.lower():
+            continue
+        for ia in (-1, 0, 1):
+            for ib in (-1, 0, 1):
+                pos = np.asarray(atom["pos"], dtype=float) + ia * cell[0] + ib * cell[1]
+                delta = pos - center_pos
+                dist = float(np.linalg.norm(delta))
+                if best is None or dist < float(best["dist"]):
+                    best = {"atom": atom, "pos": pos, "delta": delta, "dist": dist, "shift": (ia, ib)}
+    if best is None:
+        die("cannot find nearest neighbor for ELF bond-plane")
+    return best
+
+
+def resolve_elf_neighbor_selector(
+    selector: str,
+    center: dict[str, object],
+    atoms: list[dict[str, object]],
+    cell: np.ndarray,
+) -> dict[str, object]:
+    text = selector.strip()
+    if text.lower() == "auto":
+        return find_nearest_elf_neighbor(center, atoms, cell, None)
+    if text.lower().endswith(":auto"):
+        element = text.split(":", 1)[0].strip()
+        return find_nearest_elf_neighbor(center, atoms, cell, element)
+    atom = parse_elf_atom_selector(text, atoms)
+    center_pos = np.asarray(center["pos"], dtype=float)
+    atom_pos = np.asarray(atom["pos"], dtype=float)
+    return {"atom": atom, "pos": atom_pos, "delta": atom_pos - center_pos, "dist": float(np.linalg.norm(atom_pos - center_pos)), "shift": (0, 0)}
+
+
+def surface_axis_vector(axis: str) -> np.ndarray:
+    return {
+        "x": np.array([1.0, 0.0, 0.0]),
+        "y": np.array([0.0, 1.0, 0.0]),
+        "z": np.array([0.0, 0.0, 1.0]),
+    }[axis]
+
+
+def sample_cube_on_plane(
+    values: np.ndarray,
+    origin: np.ndarray,
+    axes: np.ndarray,
+    shape: np.ndarray,
+    plane_origin: np.ndarray,
+    e_u: np.ndarray,
+    e_v: np.ndarray,
+    u_range: tuple[float, float],
+    v_range: tuple[float, float],
+    size: tuple[int, int],
+    interp_order: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    nu, nv = size
+    u_values = np.linspace(u_range[0], u_range[1], nu)
+    v_values = np.linspace(v_range[0], v_range[1], nv)
+    u_grid, v_grid = np.meshgrid(u_values, v_values)
+    points = plane_origin[:, None, None] + e_u[:, None, None] * (u_grid / BOHR_TO_ANGSTROM) + e_v[:, None, None] * (v_grid / BOHR_TO_ANGSTROM)
+    frac = np.linalg.inv(axes.T) @ (points.reshape(3, -1) - origin[:, None])
+    frac[0] = np.mod(frac[0], int(shape[0]))
+    frac[1] = np.mod(frac[1], int(shape[1]))
+    try:
+        from scipy.ndimage import map_coordinates
+    except ImportError:
+        die("ELF arbitrary-plane sampling needs scipy; install abacuskit plotting environment with scipy")
+    sampled = map_coordinates(values, frac, order=interp_order, mode="nearest").reshape(nv, nu)
+    return u_grid, v_grid, np.clip(sampled, 0.0, 1.0)
+
+
+def project_atoms_to_elf_plane(
+    atoms: list[dict[str, object]],
+    cell: np.ndarray,
+    plane_origin: np.ndarray,
+    e_u: np.ndarray,
+    e_v: np.ndarray,
+    e_w: np.ndarray,
+    u_range: tuple[float, float],
+    v_range: tuple[float, float],
+    max_distance: float,
+) -> list[dict[str, object]]:
+    projected: list[dict[str, object]] = []
+    for atom in atoms:
+        atom_pos = np.asarray(atom["pos"], dtype=float)
+        for ia in (-1, 0, 1):
+            for ib in (-1, 0, 1):
+                pos = atom_pos + ia * cell[0] + ib * cell[1]
+                rel = pos - plane_origin
+                u = float(np.dot(rel, e_u)) * BOHR_TO_ANGSTROM
+                v = float(np.dot(rel, e_v)) * BOHR_TO_ANGSTROM
+                w = float(np.dot(rel, e_w)) * BOHR_TO_ANGSTROM
+                if u_range[0] - 0.25 <= u <= u_range[1] + 0.25 and v_range[0] - 0.25 <= v <= v_range[1] + 0.25 and abs(w) <= max_distance:
+                    projected.append({**atom, "u": u, "v": v, "plane_distance": abs(w)})
+    unique: list[dict[str, object]] = []
+    seen: set[tuple[str, float, float]] = set()
+    for atom in sorted(projected, key=lambda item: (int(item["idx"]), float(item["plane_distance"]))):
+        key = (str(atom["symbol"]), round(float(atom["u"]), 2), round(float(atom["v"]), 2))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(atom)
+    return unique
+
+
+def elf_interp_order(name: str) -> int:
+    return {"nearest": 0, "linear": 1, "cubic": 3}[name]
+
+
+def parse_elf_size(text: str) -> tuple[int, int]:
+    parts = re.split(r"[x,:\s]+", text.strip().lower())
+    if len(parts) != 2:
+        die("--size must look like 420x520")
+    return int(parts[0]), int(parts[1])
+
+
+def draw_elf_projected_atoms(ax, atoms: list[dict[str, object]], selected: set[int]) -> None:
+    for symbol in sorted({str(atom["symbol"]) for atom in atoms}):
+        for atom in atoms:
+            if str(atom["symbol"]) != symbol:
+                continue
+            size = 72 if symbol == "H" else 150 if symbol in {"Cu", "Ag", "Au", "Pt", "Ni", "Fe", "Co"} else 86
+            color = ELEMENT_PLOT_COLORS.get(symbol, "#cccccc")
+            ax.scatter(float(atom["u"]), float(atom["v"]), s=size, c=color, edgecolors="black", linewidths=0.9, zorder=5)
+            if int(atom["idx"]) in selected:
+                ax.text(float(atom["u"]) + 0.05, float(atom["v"]) + 0.06, symbol, fontsize=10, weight="bold", zorder=6)
+
+
+def plot_elf_plane_map(
+    out: Path,
+    u_grid: np.ndarray,
+    v_grid: np.ndarray,
+    elf: np.ndarray,
+    projected_atoms: list[dict[str, object]],
+    selected_atoms: set[int],
+    levels: list[float],
+    style: str,
+    cmap: str,
+    xlabel: str,
+    ylabel: str,
+) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(5.4, 6.6), dpi=300)
+    if style == "contour":
+        mappable = ax.contour(u_grid, v_grid, elf, levels=levels, cmap=cmap, vmin=0.0, vmax=1.0, linewidths=1.25)
+        ticks = levels
+    else:
+        fill_levels = np.linspace(0.0, 1.0, 41)
+        mappable = ax.contourf(u_grid, v_grid, elf, levels=fill_levels, cmap=cmap, vmin=0.0, vmax=1.0)
+        ax.contour(u_grid, v_grid, elf, levels=levels, colors="white", linewidths=0.7, alpha=0.9)
+        ticks = sorted(set([0.0, 0.2, 0.3, 0.5, 0.7, 0.85, 1.0]))
+    draw_elf_projected_atoms(ax, projected_atoms, selected_atoms)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.tick_params(direction="out", length=3.5, width=0.8)
+    colorbar = fig.colorbar(mappable, ax=ax, ticks=ticks, pad=0.02)
+    colorbar.set_label("ELF")
+    fig.tight_layout()
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_elf_interpolation_compare(
+    out: Path,
+    values: np.ndarray,
+    origin: np.ndarray,
+    axes: np.ndarray,
+    shape: np.ndarray,
+    plane_origin: np.ndarray,
+    e_u: np.ndarray,
+    e_v: np.ndarray,
+    u_range: tuple[float, float],
+    v_range: tuple[float, float],
+    size: tuple[int, int],
+    projected_atoms: list[dict[str, object]],
+    selected_atoms: set[int],
+    levels: list[float],
+    cmap: str,
+    xlabel: str,
+    ylabel: str,
+) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig, axes_plot = plt.subplots(1, 3, figsize=(12.6, 4.8), dpi=240, sharex=True, sharey=True)
+    im = None
+    for ax, (label, order) in zip(axes_plot, [("Nearest grid", 0), ("Linear interpolation", 1), ("Cubic interpolation", 3)]):
+        u_grid, v_grid, elf = sample_cube_on_plane(values, origin, axes, shape, plane_origin, e_u, e_v, u_range, v_range, size, order)
+        im = ax.contourf(u_grid, v_grid, elf, levels=np.linspace(0.0, 1.0, 41), cmap=cmap, vmin=0.0, vmax=1.0)
+        ax.contour(u_grid, v_grid, elf, levels=levels, colors="white", linewidths=0.45, alpha=0.8)
+        draw_elf_projected_atoms(ax, projected_atoms, selected_atoms)
+        ax.set_title(label, fontsize=10)
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_xlabel(xlabel)
+    axes_plot[0].set_ylabel(ylabel)
+    colorbar = fig.colorbar(im, ax=axes_plot.ravel().tolist(), ticks=[0.0, 0.3, 0.5, 0.7, 0.85, 1.0], pad=0.015)
+    colorbar.set_label("ELF")
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+
+
+def write_elf_line_profile(
+    prefix: Path,
+    values: np.ndarray,
+    origin: np.ndarray,
+    axes: np.ndarray,
+    shape: np.ndarray,
+    atom_a: dict[str, object],
+    atom_b: dict[str, object],
+    atom_b_pos: np.ndarray | None = None,
+    points: int = 320,
+) -> dict[str, float]:
+    try:
+        from scipy.ndimage import map_coordinates
+    except ImportError:
+        die("ELF line profile needs scipy; install abacuskit plotting environment with scipy")
+    pos_a = np.asarray(atom_a["pos"], dtype=float)
+    pos_b = np.asarray(atom_b_pos, dtype=float) if atom_b_pos is not None else np.asarray(atom_b["pos"], dtype=float)
+    t = np.linspace(0.0, 1.0, points)
+    line = pos_a[:, None] * (1.0 - t)[None, :] + pos_b[:, None] * t[None, :]
+    frac = np.linalg.inv(axes.T) @ (line - origin[:, None])
+    frac[0] = np.mod(frac[0], int(shape[0]))
+    frac[1] = np.mod(frac[1], int(shape[1]))
+    nearest = np.clip(map_coordinates(values, frac, order=0, mode="nearest"), 0.0, 1.0)
+    linear = np.clip(map_coordinates(values, frac, order=1, mode="nearest"), 0.0, 1.0)
+    cubic = np.clip(map_coordinates(values, frac, order=3, mode="nearest"), 0.0, 1.0)
+    distance = t * float(np.linalg.norm(pos_b - pos_a)) * BOHR_TO_ANGSTROM
+    csv_path = prefix.with_name(prefix.name + "_line_profile.csv")
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open("w") as handle:
+        handle.write("distance_A,t_from_atom1_to_atom2,ELF_nearest,ELF_linear,ELF_cubic\n")
+        for row in zip(distance, t, nearest, linear, cubic):
+            handle.write(",".join(f"{value:.10g}" for value in row) + "\n")
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(5.8, 3.6), dpi=300)
+    ax.plot(distance, nearest, color="0.65", lw=1.0, label="Nearest grid")
+    ax.plot(distance, linear, color="#1f77b4", lw=1.35, label="Linear")
+    ax.plot(distance, cubic, color="#d62728", lw=1.35, label="Cubic")
+    for level in [0.2, 0.3, 0.4, 0.5, 0.7, 0.85]:
+        ax.axhline(level, color="0.88", lw=0.55, zorder=0)
+    ax.set_xlim(0.0, float(distance[-1]))
+    ax.set_ylim(0.0, 1.02)
+    ax.set_xlabel(f"Distance along {atom_a['symbol']}-{atom_b['symbol']} line (Angstrom)")
+    ax.set_ylabel("ELF")
+    ax.set_xticks([0.0, float(distance[-1]) / 2.0, float(distance[-1])])
+    ax.set_xticklabels([str(atom_a["symbol"]), f"{float(distance[-1]) / 2.0:.2f}", str(atom_b["symbol"])])
+    ax.legend(frameon=False, fontsize=8)
+    fig.tight_layout()
+    png_path = prefix.with_name(prefix.name + "_line_profile.png")
+    fig.savefig(png_path, bbox_inches="tight")
+    plt.close(fig)
+    mid_mask = (t >= 0.42) & (t <= 0.58)
+    return {
+        "distance": float(distance[-1]),
+        "mid_nearest": float(nearest[mid_mask].mean()),
+        "mid_linear": float(linear[mid_mask].mean()),
+        "mid_cubic": float(cubic[mid_mask].mean()),
+        "min_cubic": float(cubic.min()),
+        "max_cubic": float(cubic.max()),
+    }
 
 
 def plot_grid_slice(
@@ -3409,13 +3826,202 @@ def cmd_plot_grid(args) -> None:
 
 
 def cmd_plot_elf(args) -> None:
-    args.kind = "elf"
-    args.minus = None
-    args.minus_file = None
-    args.cube_out = None
-    if args.cmap is None:
-        args.cmap = "viridis"
-    cmd_plot_grid(args)
+    mode = getattr(args, "mode", "grid")
+    if mode == "grid":
+        args.kind = "elf"
+        args.minus = None
+        args.minus_file = None
+        args.cube_out = None
+        if args.cmap is None:
+            args.cmap = "viridis"
+        args.levels = 16 if getattr(args, "levels", None) is None else parse_elf_levels(args.levels, None)
+        if getattr(args, "out", None) is None:
+            prefix = getattr(args, "out_prefix", None) or Path("elf")
+            args.out = Path(prefix).with_suffix(".png")
+        cmd_plot_grid(args)
+        return
+
+    cube_file = resolve_elf_cube(args.path, args.file)
+    _, atoms, origin, axes, shape, values = read_cube_grid_with_atoms(cube_file)
+    cell = cell_vectors_from_cube_axes(axes, shape)
+    prefix = (args.out_prefix or Path("elf")).expanduser()
+    prefix.parent.mkdir(parents=True, exist_ok=True)
+    levels = parse_elf_levels(args.levels, ELF_DEFAULT_LEVELS)
+    size = parse_elf_size(args.size)
+    cmap = args.cmap or "viridis"
+    summary_lines = [
+        f"ELF mode: {mode}",
+        f"cube: {cube_file}",
+        f"levels: {levels}",
+        f"ELF color range: 0 to 1",
+    ]
+
+    if mode == "line":
+        if not args.atom or not args.neighbor:
+            die("plot-elf --mode line needs --atom and --neighbor")
+        atom_a = parse_elf_atom_selector(args.atom, atoms)
+        neighbor_data = resolve_elf_neighbor_selector(args.neighbor, atom_a, atoms, cell)
+        atom_b = neighbor_data["atom"]
+        profile = write_elf_line_profile(
+            prefix,
+            values,
+            origin,
+            axes,
+            shape,
+            atom_a,
+            atom_b,
+            atom_b_pos=np.asarray(neighbor_data["pos"], dtype=float),
+            points=args.line_points,
+        )
+        summary_lines.extend(
+            [
+                f"atom1: {atom_a['symbol']}:{atom_a['idx']}",
+                f"atom2: {atom_b['symbol']}:{atom_b['idx']} shift={neighbor_data['shift']}",
+                f"distance: {profile['distance']:.5f} Angstrom",
+                f"midpoint ELF mean nearest/linear/cubic: {profile['mid_nearest']:.5f}, {profile['mid_linear']:.5f}, {profile['mid_cubic']:.5f}",
+                f"minimum/maximum cubic ELF along line: {profile['min_cubic']:.5f}, {profile['max_cubic']:.5f}",
+                f"outputs:",
+                f"  {prefix.with_name(prefix.name + '_line_profile.png')}",
+                f"  {prefix.with_name(prefix.name + '_line_profile.csv')}",
+            ]
+        )
+        summary = prefix.with_name(prefix.name + "_summary.txt")
+        summary.write_text("\n".join(summary_lines) + "\n")
+        print(f"wrote ELF line profile {prefix.with_name(prefix.name + '_line_profile.png')}")
+        print(f"wrote ELF line profile data {prefix.with_name(prefix.name + '_line_profile.csv')}")
+        print(f"wrote ELF summary {summary}")
+        return
+
+    selected_atoms: set[int] = set()
+    e_u: np.ndarray
+    e_v: np.ndarray
+    e_w: np.ndarray
+    plane_origin: np.ndarray
+    u_range: tuple[float, float]
+    v_range: tuple[float, float]
+    xlabel = "Plane u coordinate (Angstrom)"
+    ylabel = "Plane v coordinate (Angstrom)"
+    profile_info: dict[str, float] | None = None
+
+    if mode == "bond-plane":
+        if not args.atom:
+            die("plot-elf --mode bond-plane needs --atom")
+        center = parse_elf_atom_selector(args.atom, atoms)
+        neighbor_data = resolve_elf_neighbor_selector(args.neighbor or "auto", center, atoms, cell)
+        neighbor = neighbor_data["atom"]
+        center_pos = np.asarray(center["pos"], dtype=float)
+        neighbor_pos = np.asarray(neighbor_data["pos"], dtype=float)
+        surface = surface_axis_vector(args.surface_axis)
+        bond = center_pos - neighbor_pos
+        lateral = bond - np.dot(bond, surface) * surface
+        if np.linalg.norm(lateral) < 1.0e-8:
+            die("bond projection onto the surface plane is too small; use --mode atoms-plane")
+        e_u = lateral / np.linalg.norm(lateral)
+        e_v = surface
+        e_w = np.cross(e_u, e_v)
+        e_w = e_w / np.linalg.norm(e_w)
+        plane_origin = center_pos
+        center_v = 0.0
+        neighbor_u = float(np.dot(neighbor_pos - center_pos, e_u)) * BOHR_TO_ANGSTROM
+        neighbor_v = float(np.dot(neighbor_pos - center_pos, e_v)) * BOHR_TO_ANGSTROM
+        u_range = (min(0.0, neighbor_u) - args.u_pad, max(0.0, neighbor_u) + args.u_pad)
+        v_range = (min(center_v, neighbor_v) - args.v_pad_low, max(center_v, neighbor_v) + args.v_pad_high)
+        xlabel = "Distance parallel to surface (Angstrom)"
+        ylabel = f"Distance along {args.surface_axis} normal (Angstrom)"
+        selected_atoms = {int(center["idx"]), int(neighbor["idx"])}
+        summary_lines.extend(
+            [
+                f"center atom: {center['symbol']}:{center['idx']}",
+                f"neighbor atom: {neighbor['symbol']}:{neighbor['idx']} shift={neighbor_data['shift']}",
+                f"distance: {float(neighbor_data['dist']) * BOHR_TO_ANGSTROM:.5f} Angstrom",
+                f"surface axis: {args.surface_axis}",
+                f"u range: {u_range[0]:.3f} to {u_range[1]:.3f} Angstrom",
+                f"v range: {v_range[0]:.3f} to {v_range[1]:.3f} Angstrom",
+            ]
+        )
+        if args.profile:
+            profile_info = write_elf_line_profile(
+                prefix,
+                values,
+                origin,
+                axes,
+                shape,
+                neighbor,
+                center,
+                atom_b_pos=center_pos,
+                points=args.line_points,
+            )
+    elif mode == "atoms-plane":
+        if not args.atoms:
+            die("plot-elf --mode atoms-plane needs --atoms A,B,C")
+        selectors = [item.strip() for item in args.atoms.split(",") if item.strip()]
+        if len(selectors) != 3:
+            die("--atoms must contain exactly three atom selectors")
+        atom1, atom2, atom3 = [parse_elf_atom_selector(item, atoms) for item in selectors]
+        p1 = np.asarray(atom1["pos"], dtype=float)
+        p2 = np.asarray(atom2["pos"], dtype=float)
+        p3 = np.asarray(atom3["pos"], dtype=float)
+        e_u = p2 - p1
+        if np.linalg.norm(e_u) < 1.0e-8:
+            die("first two atoms for --atoms define a zero vector")
+        e_u = e_u / np.linalg.norm(e_u)
+        v_raw = p3 - p1 - np.dot(p3 - p1, e_u) * e_u
+        if np.linalg.norm(v_raw) < 1.0e-8:
+            die("three atoms are collinear; cannot define a plane")
+        e_v = v_raw / np.linalg.norm(v_raw)
+        e_w = np.cross(e_u, e_v)
+        e_w = e_w / np.linalg.norm(e_w)
+        plane_origin = p1
+        coords = []
+        for atom in (atom1, atom2, atom3):
+            rel = np.asarray(atom["pos"], dtype=float) - plane_origin
+            coords.append((float(np.dot(rel, e_u)) * BOHR_TO_ANGSTROM, float(np.dot(rel, e_v)) * BOHR_TO_ANGSTROM))
+        u_values = [coord[0] for coord in coords]
+        v_values = [coord[1] for coord in coords]
+        u_range = (min(u_values) - args.u_pad, max(u_values) + args.u_pad)
+        v_range = (min(v_values) - args.v_pad_low, max(v_values) + args.v_pad_high)
+        selected_atoms = {int(atom1["idx"]), int(atom2["idx"]), int(atom3["idx"])}
+        summary_lines.extend(
+            [
+                f"plane atoms: {atom1['symbol']}:{atom1['idx']}, {atom2['symbol']}:{atom2['idx']}, {atom3['symbol']}:{atom3['idx']}",
+                f"u range: {u_range[0]:.3f} to {u_range[1]:.3f} Angstrom",
+                f"v range: {v_range[0]:.3f} to {v_range[1]:.3f} Angstrom",
+            ]
+        )
+    else:
+        die(f"unknown ELF mode: {mode}")
+
+    order = elf_interp_order(args.interp)
+    u_grid, v_grid, elf = sample_cube_on_plane(values, origin, axes, shape, plane_origin, e_u, e_v, u_range, v_range, size, order)
+    projected = project_atoms_to_elf_plane(atoms, cell, plane_origin, e_u, e_v, e_w, u_range, v_range, args.plane_distance)
+    for idx in selected_atoms:
+        atom = next(item for item in atoms if int(item["idx"]) == idx)
+        rel = np.asarray(atom["pos"], dtype=float) - plane_origin
+        projected.append({**atom, "u": float(np.dot(rel, e_u)) * BOHR_TO_ANGSTROM, "v": float(np.dot(rel, e_v)) * BOHR_TO_ANGSTROM, "plane_distance": 0.0})
+
+    contourf_out = prefix.with_name(prefix.name + "_contourf.png")
+    contour_out = prefix.with_name(prefix.name + "_contour.png")
+    plot_elf_plane_map(contourf_out, u_grid, v_grid, elf, projected, selected_atoms, levels, "contourf", cmap, xlabel, ylabel)
+    plot_elf_plane_map(contour_out, u_grid, v_grid, elf, projected, selected_atoms, levels, "contour", cmap, xlabel, ylabel)
+    summary_lines.extend(["outputs:", f"  {contourf_out}", f"  {contour_out}"])
+    if args.compare_interp:
+        compare_out = prefix.with_name(prefix.name + "_interpolation_compare.png")
+        plot_elf_interpolation_compare(compare_out, values, origin, axes, shape, plane_origin, e_u, e_v, u_range, v_range, size, projected, selected_atoms, levels, cmap, xlabel, ylabel)
+        summary_lines.append(f"  {compare_out}")
+    if profile_info:
+        summary_lines.extend(
+            [
+                f"  {prefix.with_name(prefix.name + '_line_profile.png')}",
+                f"  {prefix.with_name(prefix.name + '_line_profile.csv')}",
+                f"profile distance: {profile_info['distance']:.5f} Angstrom",
+                f"profile midpoint ELF mean nearest/linear/cubic: {profile_info['mid_nearest']:.5f}, {profile_info['mid_linear']:.5f}, {profile_info['mid_cubic']:.5f}",
+            ]
+        )
+    summary = prefix.with_name(prefix.name + "_summary.txt")
+    summary.write_text("\n".join(summary_lines) + "\n")
+    print(f"wrote ELF plane plot {contourf_out}")
+    print(f"wrote ELF contour plot {contour_out}")
+    print(f"wrote ELF summary {summary}")
 
 
 def infer_type_map_from_data(paths: list[Path]) -> list[str]:
@@ -5257,19 +5863,34 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", type=Path, required=True)
     p.set_defaults(func=cmd_plot_grid)
 
-    p = sub.add_parser("plot-elf", help="plot 2D ELF cube slices as contour or filled contour maps")
+    p = sub.add_parser("plot-elf", help="plot ELF cube slices, bond/plane maps, and atom-to-atom profiles")
     p.add_argument("path", type=Path, help="ABACUS job directory, OUT.* directory, or ELF cube file")
     p.add_argument("--file", type=Path, help="explicit ELF cube file")
+    p.add_argument("--mode", choices=["grid", "line", "bond-plane", "atoms-plane"], default="grid", help="ELF analysis mode")
     p.add_argument("--axis", choices=["x", "y", "z"], default="z")
     p.add_argument("--index", type=int, help="slice index; default is the middle slice")
     p.add_argument("--style", choices=["contourf", "contour", "both", "image"], default="contourf", help="ELF 2D plot style")
-    p.add_argument("--levels", type=int, default=16, help="number of contour levels")
+    p.add_argument("--levels", help="contour levels, e.g. 0.2,0.3,0.4,0.5,0.7,0.85; grid mode also accepts a count")
     p.add_argument("--vmin", type=float, default=0.0, help="minimum plotted ELF value")
     p.add_argument("--vmax", type=float, default=1.0, help="maximum plotted ELF value")
     p.add_argument("--cmap", default="viridis", help="matplotlib colormap name")
     p.add_argument("--title", help="plot title")
     p.add_argument("--contour-color", default="black", help="contour line color for contour/both styles")
-    p.add_argument("--out", type=Path, required=True)
+    p.add_argument("--atom", help="atom selector for line/bond-plane, e.g. 97 or H:97")
+    p.add_argument("--neighbor", default="auto", help="line/bond neighbor: auto, Element:auto, atom index, or Element:index")
+    p.add_argument("--atoms", help="three atom selectors for atoms-plane, e.g. H:97,Cu:20,O:84")
+    p.add_argument("--surface-axis", choices=["x", "y", "z"], default="z", help="surface normal axis for bond-plane mode")
+    p.add_argument("--u-pad", type=float, default=0.90, help="padding along bond/plane u direction in Angstrom")
+    p.add_argument("--v-pad-low", type=float, default=0.55, help="lower padding along plane v direction in Angstrom")
+    p.add_argument("--v-pad-high", type=float, default=1.35, help="upper padding along plane v direction in Angstrom")
+    p.add_argument("--plane-distance", type=float, default=0.42, help="show atoms within this distance from the plane in Angstrom")
+    p.add_argument("--size", default="420x520", help="sample grid for arbitrary planes, e.g. 420x520")
+    p.add_argument("--interp", choices=["nearest", "linear", "cubic"], default="linear", help="interpolation used for plane maps")
+    p.add_argument("--profile", action="store_true", help="also write atom-to-atom ELF profile for bond-plane mode")
+    p.add_argument("--compare-interp", action="store_true", help="also write nearest/linear/cubic interpolation comparison for plane modes")
+    p.add_argument("--line-points", type=int, default=320, help="number of points for line profile")
+    p.add_argument("--out-prefix", type=Path, help="output prefix for line/bond-plane/atoms-plane modes")
+    p.add_argument("--out", type=Path, help="output PNG for grid mode")
     p.set_defaults(func=cmd_plot_elf)
 
     p = sub.add_parser("bader", help="calculate Bader charges from ABACUS charge-density cube output")

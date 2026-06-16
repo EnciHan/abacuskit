@@ -36,7 +36,7 @@ classifiers = [
 
 [project.optional-dependencies]
 deepmd = ["dpdata"]
-plot = ["matplotlib"]
+plot = ["matplotlib", "scipy"]
 dev = ["build", "twine"]
 
 [project.scripts]
