@@ -617,7 +617,15 @@ abacuskit plot-elf OUT.ABACUS \
 
 `plot-elf` 默认把 ELF 色标固定为 `0` 到 `1`，填色图使用连续色阶，辅助等值线默认取 `0.20,0.30,0.40,0.50,0.60,0.70,0.85`。可以用 `--levels 0.2,0.3,0.5,0.7,0.85` 自定义关键等值线，用 `--interp nearest|linear|cubic` 控制二维平面插值；`--compare-interp` 会额外输出最近网格、线性插值和三次插值对比图，便于判断插值是否过度平滑。
 
-菜单里输入 `8` 会在当前目录自动绘制电荷密度并生成 `charge.png`；输入 `9` 会提示输入被减去的任务或输出目录，然后生成 `charge_diff.png` 和可选的 `charge_diff.cube`；输入 `10` 会在当前目录自动绘制 ELF 并生成 `elf.png`。
+菜单里输入 `8` 会在当前目录自动绘制电荷密度并生成 `charge.png`；输入 `9` 会提示输入被减去的任务或输出目录，然后生成 `charge_diff.png` 和可选的 `charge_diff.cube`。输入 `10` 会进入 ELF `100x` 二级菜单：
+
+```text
+1000  List atom indices from elf.cube
+1001  Grid slice: normal x/y/z cube slice
+1002  1D ELF curve between two atoms
+1003  2D bond-plane: parallel to a bond and normal to a surface plane
+1004  2D atoms-plane: plane defined by three atoms
+```
 
 ## 12. Bader 电荷计算
 

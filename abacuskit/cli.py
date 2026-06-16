@@ -5133,9 +5133,153 @@ def interactive_plot_charge_diff() -> None:
     run_interactive_plot_grid("diff", "charge_diff.png")
 
 
+def default_plot_elf_args() -> argparse.Namespace:
+    return argparse.Namespace(
+        path=Path("."),
+        file=None,
+        mode="grid",
+        axis="z",
+        index=None,
+        style="contourf",
+        levels=None,
+        vmin=0.0,
+        vmax=1.0,
+        cmap=None,
+        title=None,
+        contour_color="black",
+        atom=None,
+        neighbor="auto",
+        atoms=None,
+        surface_axis="z",
+        u_pad=0.90,
+        v_pad_low=0.55,
+        v_pad_high=1.35,
+        plane_distance=0.42,
+        size="420x520",
+        interp="linear",
+        profile=False,
+        compare_interp=False,
+        line_points=320,
+        out_prefix=None,
+        out=None,
+    )
+
+
+def interactive_elf_list_atoms() -> None:
+    args = default_plot_elf_args()
+    args.path = prompt_path("ABACUS job, OUT.* directory, or elf.cube", ".")
+    file_text = prompt_text("Explicit elf.cube file, empty for auto", "")
+    args.file = Path(file_text).expanduser() if file_text else None
+    cube_file = resolve_elf_cube(args.path, args.file)
+    _, atoms, _, _, _, _ = read_cube_grid_with_atoms(cube_file)
+    print(f"\nAtoms in {cube_file}:")
+    print("  index  elem        x(A)        y(A)        z(A)")
+    for atom in atoms:
+        pos = np.asarray(atom["pos"], dtype=float) * BOHR_TO_ANGSTROM
+        print(f"  {int(atom['idx']):5d}  {str(atom['symbol']):>4s}  {pos[0]:10.5f}  {pos[1]:10.5f}  {pos[2]:10.5f}")
+
+
+def interactive_elf_grid_slice() -> None:
+    args = default_plot_elf_args()
+    args.mode = "grid"
+    args.path = prompt_path("ABACUS job, OUT.* directory, or elf.cube", ".")
+    file_text = prompt_text("Explicit elf.cube file, empty for auto", "")
+    args.file = Path(file_text).expanduser() if file_text else None
+    args.axis = prompt_choice("Slice axis", ["z", "x", "y"], "z")
+    index_text = prompt_text("Slice index, empty for middle", "")
+    args.index = int(index_text) if index_text else None
+    args.style = prompt_choice("Plot style", ["contourf", "contour", "both", "image"], "contourf")
+    args.levels = prompt_text("Contour levels or count", "0.2,0.3,0.4,0.5,0.6,0.7,0.85")
+    args.out = prompt_path("Output image", "elf.png")
+    cmd_plot_elf(args)
+    print("ELF grid-slice plot finished. Exiting abacuskit.")
+    raise ProgramExit
+
+
+def interactive_elf_line_profile() -> None:
+    args = default_plot_elf_args()
+    args.mode = "line"
+    args.path = prompt_path("ABACUS job, OUT.* directory, or elf.cube", ".")
+    file_text = prompt_text("Explicit elf.cube file, empty for auto", "")
+    args.file = Path(file_text).expanduser() if file_text else None
+    args.atom = prompt_text("First atom, e.g. Cu:20 or 20")
+    args.neighbor = prompt_text("Second atom, e.g. H:97, auto, or Cu:auto", "auto")
+    args.line_points = prompt_int("Line profile points", 320)
+    args.out_prefix = prompt_path("Output prefix", "elf_line")
+    cmd_plot_elf(args)
+    print("ELF line profile finished. Exiting abacuskit.")
+    raise ProgramExit
+
+
+def interactive_elf_bond_plane() -> None:
+    args = default_plot_elf_args()
+    args.mode = "bond-plane"
+    args.path = prompt_path("ABACUS job, OUT.* directory, or elf.cube", ".")
+    file_text = prompt_text("Explicit elf.cube file, empty for auto", "")
+    args.file = Path(file_text).expanduser() if file_text else None
+    args.atom = prompt_text("Center atom, e.g. H:97 or 97")
+    args.neighbor = prompt_text("Bond neighbor, e.g. Cu:auto, auto, or Cu:20", "auto")
+    args.surface_axis = prompt_choice("Surface normal axis", ["z", "x", "y"], "z")
+    args.profile = prompt_yes_no("Also write atom-to-atom ELF profile", True)
+    args.compare_interp = prompt_yes_no("Also write nearest/linear/cubic interpolation comparison", True)
+    args.interp = prompt_choice("Plane interpolation", ["linear", "nearest", "cubic"], "linear")
+    args.levels = prompt_text("Contour levels", "0.2,0.3,0.4,0.5,0.6,0.7,0.85")
+    args.out_prefix = prompt_path("Output prefix", "elf_bond_plane")
+    cmd_plot_elf(args)
+    print("ELF bond-plane plot finished. Exiting abacuskit.")
+    raise ProgramExit
+
+
+def interactive_elf_atoms_plane() -> None:
+    args = default_plot_elf_args()
+    args.mode = "atoms-plane"
+    args.path = prompt_path("ABACUS job, OUT.* directory, or elf.cube", ".")
+    file_text = prompt_text("Explicit elf.cube file, empty for auto", "")
+    args.file = Path(file_text).expanduser() if file_text else None
+    args.atoms = prompt_text("Three atoms, e.g. H:97,Cu:20,O:68")
+    args.compare_interp = prompt_yes_no("Also write nearest/linear/cubic interpolation comparison", True)
+    args.interp = prompt_choice("Plane interpolation", ["linear", "nearest", "cubic"], "linear")
+    args.levels = prompt_text("Contour levels", "0.2,0.3,0.4,0.5,0.6,0.7,0.85")
+    args.out_prefix = prompt_path("Output prefix", "elf_atoms_plane")
+    cmd_plot_elf(args)
+    print("ELF atoms-plane plot finished. Exiting abacuskit.")
+    raise ProgramExit
+
+
 def interactive_plot_elf() -> None:
-    print("\n[10] Plot ELF in current directory\n")
-    run_interactive_plot_grid("elf", "elf.png")
+    print(
+        """
+---------- 100x: Plot ELF ----------
+  1000) List atom indices from elf.cube
+  1001) Grid slice: normal x/y/z cube slice
+  1002) 1D ELF curve between two atoms
+  1003) 2D bond-plane: parallel to a bond and normal to a surface plane
+  1004) 2D atoms-plane: plane defined by three atoms
+  0) Back to previous menu
+  q) Quit abacuskit
+"""
+    )
+    choice = prompt_text("Enter 100x option", "1003").lower()
+    if choice in {"q", "quit", "exit"}:
+        raise ProgramExit
+    if choice in {"0", "100"}:
+        return
+    if choice == "1000":
+        interactive_elf_list_atoms()
+        return
+    if choice == "1001":
+        interactive_elf_grid_slice()
+        return
+    if choice == "1002":
+        interactive_elf_line_profile()
+        return
+    if choice == "1003":
+        interactive_elf_bond_plane()
+        return
+    if choice == "1004":
+        interactive_elf_atoms_plane()
+        return
+    print("Unknown 100x option.")
 
 
 def interactive_cohp() -> None:
