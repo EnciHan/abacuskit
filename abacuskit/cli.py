@@ -3276,6 +3276,7 @@ def find_grid_file(root: Path, kind: str) -> Path | None:
 
 BOHR_TO_ANGSTROM = 0.529177210903
 ELF_DEFAULT_LEVELS = [0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.85]
+ELF_COLORBAR_TICKS = [round(0.1 * i, 1) for i in range(11)]
 ELEMENT_PLOT_COLORS = {
     "H": "#f7f7f7",
     "C": "#444444",
@@ -3592,7 +3593,7 @@ def plot_elf_plane_map(
         fill_levels = np.linspace(0.0, 1.0, 41)
         mappable = ax.contourf(u_grid, v_grid, elf, levels=fill_levels, cmap=cmap, vmin=0.0, vmax=1.0)
         ax.contour(u_grid, v_grid, elf, levels=levels, colors="white", linewidths=0.7, alpha=0.9)
-        ticks = sorted(set([0.0, 0.2, 0.3, 0.5, 0.7, 0.85, 1.0]))
+        ticks = ELF_COLORBAR_TICKS
     draw_elf_projected_atoms(ax, projected_atoms, selected_atoms)
     ax.set_aspect("equal", adjustable="box")
     ax.set_xlabel(xlabel)
@@ -3641,7 +3642,7 @@ def plot_elf_interpolation_compare(
         ax.set_aspect("equal", adjustable="box")
         ax.set_xlabel(xlabel)
     axes_plot[0].set_ylabel(ylabel)
-    colorbar = fig.colorbar(im, ax=axes_plot.ravel().tolist(), ticks=[0.0, 0.3, 0.5, 0.7, 0.85, 1.0], pad=0.015)
+    colorbar = fig.colorbar(im, ax=axes_plot.ravel().tolist(), ticks=ELF_COLORBAR_TICKS, pad=0.015)
     colorbar.set_label("ELF")
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
