@@ -3275,8 +3275,13 @@ def find_grid_file(root: Path, kind: str) -> Path | None:
 
 
 BOHR_TO_ANGSTROM = 0.529177210903
-ELF_DEFAULT_LEVELS = [0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.85]
 ELF_COLORBAR_TICKS = [round(0.1 * i, 1) for i in range(11)]
+ELF_DEFAULT_LEVELS = list(ELF_COLORBAR_TICKS)
+ELF_DEFAULT_LEVELS_TEXT = ",".join(f"{level:.1f}" for level in ELF_DEFAULT_LEVELS)
+ELF_FILL_LEVEL_COUNT = 256
+ELF_DEFAULT_U_PAD = 1.90
+ELF_DEFAULT_V_PAD_LOW = 1.55
+ELF_DEFAULT_V_PAD_HIGH = 2.35
 ELF_REFERENCE_CMAP = "abacuskit_elf_reference"
 ELF_REFERENCE_COLORS = [
     (0.0, "#220044"),
@@ -3613,7 +3618,7 @@ def plot_elf_plane_map(
         mappable = ax.contour(u_grid, v_grid, elf, levels=levels, cmap=cmap_obj, vmin=0.0, vmax=1.0, linewidths=1.25)
         ticks = levels
     else:
-        fill_levels = np.linspace(0.0, 1.0, 41)
+        fill_levels = np.linspace(0.0, 1.0, ELF_FILL_LEVEL_COUNT)
         mappable = ax.contourf(u_grid, v_grid, elf, levels=fill_levels, cmap=cmap_obj, vmin=0.0, vmax=1.0)
         ax.contour(u_grid, v_grid, elf, levels=levels, colors="white", linewidths=0.7, alpha=0.9)
         ticks = ELF_COLORBAR_TICKS
@@ -3659,7 +3664,7 @@ def plot_elf_interpolation_compare(
     cmap_obj = resolve_elf_cmap(cmap)
     for ax, (label, order) in zip(axes_plot, [("Nearest grid", 0), ("Linear interpolation", 1), ("Cubic interpolation", 3)]):
         u_grid, v_grid, elf = sample_cube_on_plane(values, origin, axes, shape, plane_origin, e_u, e_v, u_range, v_range, size, order)
-        im = ax.contourf(u_grid, v_grid, elf, levels=np.linspace(0.0, 1.0, 41), cmap=cmap_obj, vmin=0.0, vmax=1.0)
+        im = ax.contourf(u_grid, v_grid, elf, levels=np.linspace(0.0, 1.0, ELF_FILL_LEVEL_COUNT), cmap=cmap_obj, vmin=0.0, vmax=1.0)
         ax.contour(u_grid, v_grid, elf, levels=levels, colors="white", linewidths=0.45, alpha=0.8)
         draw_elf_projected_atoms(ax, projected_atoms, selected_atoms)
         ax.set_title(label, fontsize=10)
@@ -3714,7 +3719,7 @@ def write_elf_line_profile(
     ax.plot(distance, nearest, color="0.65", lw=1.0, label="Nearest grid")
     ax.plot(distance, linear, color="#1f77b4", lw=1.35, label="Linear")
     ax.plot(distance, cubic, color="#d62728", lw=1.35, label="Cubic")
-    for level in [0.2, 0.3, 0.4, 0.5, 0.7, 0.85]:
+    for level in ELF_COLORBAR_TICKS[1:-1]:
         ax.axhline(level, color="0.88", lw=0.55, zorder=0)
     ax.set_xlim(0.0, float(distance[-1]))
     ax.set_ylim(0.0, 1.02)
@@ -3770,12 +3775,16 @@ def plot_grid_slice(
         y = np.arange(data.shape[0])
         xx, yy = np.meshgrid(x, y)
         contour_levels = grid_contour_levels(data, levels, vmin, vmax)
-        if style in {"contourf", "both"}:
+        if label == "ELF" and style in {"contourf", "both"}:
+            mappable = ax.contourf(xx, yy, data, levels=np.linspace(0.0, 1.0, ELF_FILL_LEVEL_COUNT), cmap=cmap_obj)
+            ax.contour(xx, yy, data, levels=contour_levels, colors=contour_color, linewidths=0.35)
+        elif style in {"contourf", "both"}:
             mappable = ax.contourf(xx, yy, data, levels=contour_levels, cmap=cmap_obj, extend="both")
         else:
             mappable = ax.contour(xx, yy, data, levels=contour_levels, colors=contour_color, linewidths=0.8)
-            ax.clabel(mappable, inline=True, fontsize=7, fmt="%.2g")
-        if style == "both":
+            if label != "ELF":
+                ax.clabel(mappable, inline=True, fontsize=7, fmt="%.2g")
+        if style == "both" and label != "ELF":
             line_levels = contour_levels
             contours = ax.contour(xx, yy, data, levels=line_levels, colors=contour_color, linewidths=0.35)
             ax.clabel(contours, inline=True, fontsize=7, fmt="%.2g")
@@ -3861,7 +3870,7 @@ def cmd_plot_elf(args) -> None:
         args.cube_out = None
         if args.cmap is None:
             args.cmap = ELF_REFERENCE_CMAP
-        args.levels = 16 if getattr(args, "levels", None) is None else parse_elf_levels(args.levels, None)
+        args.levels = ELF_DEFAULT_LEVELS if getattr(args, "levels", None) is None else parse_elf_levels(args.levels, None)
         if getattr(args, "out", None) is None:
             prefix = getattr(args, "out_prefix", None) or Path("elf")
             args.out = Path(prefix).with_suffix(".png")
@@ -5178,9 +5187,9 @@ def default_plot_elf_args() -> argparse.Namespace:
         neighbor="auto",
         atoms=None,
         surface_axis="z",
-        u_pad=0.90,
-        v_pad_low=0.55,
-        v_pad_high=1.35,
+        u_pad=ELF_DEFAULT_U_PAD,
+        v_pad_low=ELF_DEFAULT_V_PAD_LOW,
+        v_pad_high=ELF_DEFAULT_V_PAD_HIGH,
         plane_distance=0.42,
         size="420x520",
         interp="linear",
@@ -5216,7 +5225,7 @@ def interactive_elf_grid_slice() -> None:
     args.axis = prompt_choice("Slice axis", ["z", "x", "y"], "z")
     index_text = prompt_text("Slice index, empty for middle", "")
     args.index = int(index_text) if index_text else None
-    args.levels = "0.2,0.3,0.4,0.5,0.6,0.7,0.85"
+    args.levels = ELF_DEFAULT_LEVELS_TEXT
     args.out = Path("elf.png")
     cmd_plot_elf(args)
     print("ELF grid-slice plot finished. Exiting abacuskit.")
@@ -5243,7 +5252,7 @@ def interactive_elf_bond_plane() -> None:
     args.neighbor = neighbor
     args.profile = True
     args.compare_interp = True
-    args.levels = "0.2,0.3,0.4,0.5,0.6,0.7,0.85"
+    args.levels = ELF_DEFAULT_LEVELS_TEXT
     args.out_prefix = Path("elf_bond_plane")
     cmd_plot_elf(args)
     print("ELF bond-plane plot finished. Exiting abacuskit.")
@@ -5256,7 +5265,7 @@ def interactive_elf_atoms_plane() -> None:
     atoms = parse_interactive_atom_selectors(prompt_text("Three atoms, e.g. H:97,Cu:20,O:68 or 97 20 68"), 3, "H:97,Cu:20,O:68")
     args.atoms = ",".join(atoms)
     args.compare_interp = True
-    args.levels = "0.2,0.3,0.4,0.5,0.6,0.7,0.85"
+    args.levels = ELF_DEFAULT_LEVELS_TEXT
     args.out_prefix = Path("elf_atoms_plane")
     cmd_plot_elf(args)
     print("ELF atoms-plane plot finished. Exiting abacuskit.")
@@ -6031,7 +6040,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--axis", choices=["x", "y", "z"], default="z")
     p.add_argument("--index", type=int, help="slice index; default is the middle slice")
     p.add_argument("--style", choices=["contourf", "contour", "both", "image"], default="contourf", help="ELF 2D plot style")
-    p.add_argument("--levels", help="contour levels, e.g. 0.2,0.3,0.4,0.5,0.7,0.85; grid mode also accepts a count")
+    p.add_argument("--levels", help="contour levels, e.g. 0.0,0.1,0.2,...,1.0; grid mode also accepts a count")
     p.add_argument("--vmin", type=float, default=0.0, help="minimum plotted ELF value")
     p.add_argument("--vmax", type=float, default=1.0, help="maximum plotted ELF value")
     p.add_argument("--cmap", help="matplotlib colormap name")
@@ -6041,9 +6050,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--neighbor", default="auto", help="line/bond neighbor: auto, Element:auto, atom index, or Element:index")
     p.add_argument("--atoms", help="three atom selectors for atoms-plane, e.g. H:97,Cu:20,O:84")
     p.add_argument("--surface-axis", choices=["x", "y", "z"], default="z", help="surface normal axis for bond-plane mode")
-    p.add_argument("--u-pad", type=float, default=0.90, help="padding along bond/plane u direction in Angstrom")
-    p.add_argument("--v-pad-low", type=float, default=0.55, help="lower padding along plane v direction in Angstrom")
-    p.add_argument("--v-pad-high", type=float, default=1.35, help="upper padding along plane v direction in Angstrom")
+    p.add_argument("--u-pad", type=float, default=ELF_DEFAULT_U_PAD, help="padding along bond/plane u direction in Angstrom")
+    p.add_argument("--v-pad-low", type=float, default=ELF_DEFAULT_V_PAD_LOW, help="lower padding along plane v direction in Angstrom")
+    p.add_argument("--v-pad-high", type=float, default=ELF_DEFAULT_V_PAD_HIGH, help="upper padding along plane v direction in Angstrom")
     p.add_argument("--plane-distance", type=float, default=0.42, help="show atoms within this distance from the plane in Angstrom")
     p.add_argument("--size", default="420x520", help="sample grid for arbitrary planes, e.g. 420x520")
     p.add_argument("--interp", choices=["nearest", "linear", "cubic"], default="linear", help="interpolation used for plane maps")
