@@ -3610,6 +3610,7 @@ def plot_elf_plane_map(
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
 
     out.parent.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(5.4, 6.6), dpi=300)
@@ -3620,14 +3621,15 @@ def plot_elf_plane_map(
     else:
         fill_levels = np.linspace(0.0, 1.0, ELF_FILL_LEVEL_COUNT)
         mappable = ax.contourf(u_grid, v_grid, elf, levels=fill_levels, cmap=cmap_obj, vmin=0.0, vmax=1.0)
-        ax.contour(u_grid, v_grid, elf, levels=levels, colors="white", linewidths=0.7, alpha=0.9)
         ticks = ELF_COLORBAR_TICKS
     draw_elf_projected_atoms(ax, projected_atoms, selected_atoms)
     ax.set_aspect("equal", adjustable="box")
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     ax.tick_params(direction="out", length=3.5, width=0.8)
-    colorbar = fig.colorbar(mappable, ax=ax, ticks=ticks, pad=0.02)
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes("right", size="5%", pad=0.08)
+    colorbar = fig.colorbar(mappable, cax=cax, ticks=ticks)
     colorbar.set_label("ELF")
     fig.tight_layout()
     fig.savefig(out, bbox_inches="tight")
@@ -3665,7 +3667,6 @@ def plot_elf_interpolation_compare(
     for ax, (label, order) in zip(axes_plot, [("Nearest grid", 0), ("Linear interpolation", 1), ("Cubic interpolation", 3)]):
         u_grid, v_grid, elf = sample_cube_on_plane(values, origin, axes, shape, plane_origin, e_u, e_v, u_range, v_range, size, order)
         im = ax.contourf(u_grid, v_grid, elf, levels=np.linspace(0.0, 1.0, ELF_FILL_LEVEL_COUNT), cmap=cmap_obj, vmin=0.0, vmax=1.0)
-        ax.contour(u_grid, v_grid, elf, levels=levels, colors="white", linewidths=0.45, alpha=0.8)
         draw_elf_projected_atoms(ax, projected_atoms, selected_atoms)
         ax.set_title(label, fontsize=10)
         ax.set_aspect("equal", adjustable="box")
@@ -3777,7 +3778,8 @@ def plot_grid_slice(
         contour_levels = grid_contour_levels(data, levels, vmin, vmax)
         if label == "ELF" and style in {"contourf", "both"}:
             mappable = ax.contourf(xx, yy, data, levels=np.linspace(0.0, 1.0, ELF_FILL_LEVEL_COUNT), cmap=cmap_obj)
-            ax.contour(xx, yy, data, levels=contour_levels, colors=contour_color, linewidths=0.35)
+            if style == "both":
+                ax.contour(xx, yy, data, levels=contour_levels, colors=contour_color, linewidths=0.35)
         elif style in {"contourf", "both"}:
             mappable = ax.contourf(xx, yy, data, levels=contour_levels, cmap=cmap_obj, extend="both")
         else:
