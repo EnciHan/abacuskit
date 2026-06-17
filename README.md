@@ -615,7 +615,7 @@ abacuskit plot-elf OUT.ABACUS \
   --out-prefix elf_H_Cu_O_plane
 ```
 
-`plot-elf` 默认把 ELF 色标固定为 `0` 到 `1`，填色图使用参考 ELF 图的黑紫-蓝-青-绿-黄-橙-红连续色阶，并且不叠加辅助等值线。单独的 contour 图默认取 `0.0,0.1,0.2,...,1.0` 等值线；可以用 `--levels 0.2,0.3,0.5,0.7,0.85` 自定义关键等值线。`--interp nearest|linear|cubic` 可控制二维平面插值；`--compare-interp` 会额外输出最近网格、线性插值和三次插值对比图，便于判断插值是否过度平滑。平面图默认横向 padding 为 `1.90` Angstrom，纵向上下 padding 分别为 `1.55` 和 `2.35` Angstrom。
+`plot-elf` 默认把 ELF 色标固定为 `0` 到 `1`，填色图使用参考 ELF 图的黑紫-蓝-青-绿-黄-橙-红连续色阶，并且不叠加辅助等值线。单独的 contour 图默认取 `0.0,0.1,0.2,...,1.0` 等值线；也可以用 `--vmax x` 把色轴和等值线范围改成 `0-x`，程序会自动分成 10 等份，颜色表本身不变。需要完全自定义关键等值线时可用 `--levels 0.2,0.3,0.5,0.7,0.85`。`--interp nearest|linear|cubic` 可控制二维平面插值；`--compare-interp` 会额外输出最近网格、线性插值和三次插值对比图，便于判断插值是否过度平滑。平面图默认横向 padding 为 `1.90` Angstrom，纵向上下 padding 分别为 `1.55` 和 `2.35` Angstrom。
 
 菜单里输入 `8` 会在当前目录自动绘制电荷密度并生成 `charge.png`；输入 `9` 会提示输入被减去的任务或输出目录，然后生成 `charge_diff.png` 和可选的 `charge_diff.cube`。输入 `10` 会进入 ELF `100x` 二级菜单。交互菜单默认从当前目录或当前目录的 `OUT.*` 查找 `elf.cube`，插值方式、等值线、色标、输出名、单位和图像格式都使用默认值；需要自定义这些参数时再使用上面的 `plot-elf` 命令行。
 
@@ -625,6 +625,7 @@ abacuskit plot-elf OUT.ABACUS \
 1002  1D ELF curve: enter two atoms only
 1003  2D bond-plane: enter center atom and neighbor only
 1004  2D atoms-plane: enter three atoms only
+1005  Set ELF color/contour range: 0-x
 ```
 
 ## 12. Bader 电荷计算

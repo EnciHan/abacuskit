@@ -3321,6 +3321,16 @@ def resolve_elf_cmap(cmap: str):
     return LinearSegmentedColormap.from_list(ELF_REFERENCE_CMAP, ELF_REFERENCE_COLORS)
 
 
+def elf_range_levels(vmax: float, vmin: float = 0.0) -> list[float]:
+    if vmax <= vmin:
+        die("ELF range needs vmax > vmin")
+    return [round(float(value), 10) for value in np.linspace(vmin, vmax, 11)]
+
+
+def format_elf_levels(levels: list[float]) -> str:
+    return ",".join(f"{level:.6g}" for level in levels)
+
+
 def parse_elf_levels(value: str | int | float | None, default: list[float] | None = None) -> list[float]:
     if value is None:
         return list(default or ELF_DEFAULT_LEVELS)
@@ -3605,6 +3615,8 @@ def plot_elf_plane_map(
     cmap: str,
     xlabel: str,
     ylabel: str,
+    vmin: float,
+    vmax: float,
 ) -> None:
     import matplotlib
 
@@ -3615,13 +3627,14 @@ def plot_elf_plane_map(
     out.parent.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(5.4, 6.6), dpi=300)
     cmap_obj = resolve_elf_cmap(cmap)
+    clipped_elf = np.clip(elf, vmin, vmax)
     if style == "contour":
-        mappable = ax.contour(u_grid, v_grid, elf, levels=levels, cmap=cmap_obj, vmin=0.0, vmax=1.0, linewidths=1.25)
+        mappable = ax.contour(u_grid, v_grid, clipped_elf, levels=levels, cmap=cmap_obj, vmin=vmin, vmax=vmax, linewidths=1.25)
         ticks = levels
     else:
-        fill_levels = np.linspace(0.0, 1.0, ELF_FILL_LEVEL_COUNT)
-        mappable = ax.contourf(u_grid, v_grid, elf, levels=fill_levels, cmap=cmap_obj, vmin=0.0, vmax=1.0)
-        ticks = ELF_COLORBAR_TICKS
+        fill_levels = np.linspace(vmin, vmax, ELF_FILL_LEVEL_COUNT)
+        mappable = ax.contourf(u_grid, v_grid, clipped_elf, levels=fill_levels, cmap=cmap_obj, vmin=vmin, vmax=vmax)
+        ticks = elf_range_levels(vmax, vmin)
     draw_elf_projected_atoms(ax, projected_atoms, selected_atoms)
     ax.set_aspect("equal", adjustable="box")
     ax.set_xlabel(xlabel)
@@ -3653,6 +3666,8 @@ def plot_elf_interpolation_compare(
     cmap: str,
     xlabel: str,
     ylabel: str,
+    vmin: float,
+    vmax: float,
 ) -> None:
     import matplotlib
 
@@ -3665,13 +3680,14 @@ def plot_elf_interpolation_compare(
     cmap_obj = resolve_elf_cmap(cmap)
     for ax, (label, order) in zip(axes_plot, [("Nearest grid", 0), ("Linear interpolation", 1), ("Cubic interpolation", 3)]):
         u_grid, v_grid, elf = sample_cube_on_plane(values, origin, axes, shape, plane_origin, e_u, e_v, u_range, v_range, size, order)
-        im = ax.contourf(u_grid, v_grid, elf, levels=np.linspace(0.0, 1.0, ELF_FILL_LEVEL_COUNT), cmap=cmap_obj, vmin=0.0, vmax=1.0)
+        clipped_elf = np.clip(elf, vmin, vmax)
+        im = ax.contourf(u_grid, v_grid, clipped_elf, levels=np.linspace(vmin, vmax, ELF_FILL_LEVEL_COUNT), cmap=cmap_obj, vmin=vmin, vmax=vmax)
         draw_elf_projected_atoms(ax, projected_atoms, selected_atoms)
         ax.set_title(label, fontsize=10)
         ax.set_aspect("equal", adjustable="box")
         ax.set_xlabel(xlabel)
     axes_plot[0].set_ylabel(ylabel)
-    fig.colorbar(im, ax=axes_plot.ravel().tolist(), ticks=ELF_COLORBAR_TICKS, pad=0.015)
+    fig.colorbar(im, ax=axes_plot.ravel().tolist(), ticks=elf_range_levels(vmax, vmin), pad=0.015)
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
 
@@ -3767,28 +3783,33 @@ def plot_grid_slice(
     fig, ax = plt.subplots(figsize=(6.4, 4.8), dpi=180)
     data = plane.T
     cmap_obj = resolve_elf_cmap(cmap) if label == "ELF" else cmap
+    color_vmin = 0.0 if vmin is None else float(vmin)
+    color_vmax = 1.0 if vmax is None else float(vmax)
+    if label == "ELF" and color_vmax <= color_vmin:
+        die("ELF range needs vmax > vmin")
+    plot_data = np.clip(data, color_vmin, color_vmax) if label == "ELF" else data
     if style == "image":
-        mappable = ax.imshow(data, origin="lower", aspect="auto", cmap=cmap_obj, vmin=vmin, vmax=vmax)
+        mappable = ax.imshow(plot_data, origin="lower", aspect="auto", cmap=cmap_obj, vmin=color_vmin if label == "ELF" else vmin, vmax=color_vmax if label == "ELF" else vmax)
     else:
         x = np.arange(data.shape[1])
         y = np.arange(data.shape[0])
         xx, yy = np.meshgrid(x, y)
         contour_levels = grid_contour_levels(data, levels, vmin, vmax)
         if label == "ELF" and style in {"contourf", "both"}:
-            mappable = ax.contourf(xx, yy, data, levels=np.linspace(0.0, 1.0, ELF_FILL_LEVEL_COUNT), cmap=cmap_obj)
+            mappable = ax.contourf(xx, yy, plot_data, levels=np.linspace(color_vmin, color_vmax, ELF_FILL_LEVEL_COUNT), cmap=cmap_obj)
             if style == "both":
-                ax.contour(xx, yy, data, levels=contour_levels, colors=contour_color, linewidths=0.35)
+                ax.contour(xx, yy, plot_data, levels=contour_levels, colors=contour_color, linewidths=0.35)
         elif style in {"contourf", "both"}:
             mappable = ax.contourf(xx, yy, data, levels=contour_levels, cmap=cmap_obj, extend="both")
         else:
-            mappable = ax.contour(xx, yy, data, levels=contour_levels, colors=contour_color, linewidths=0.8)
+            mappable = ax.contour(xx, yy, plot_data if label == "ELF" else data, levels=contour_levels, colors=contour_color, linewidths=0.8)
             if label != "ELF":
                 ax.clabel(mappable, inline=True, fontsize=7, fmt="%.2g")
         if style == "both" and label != "ELF":
             line_levels = contour_levels
             contours = ax.contour(xx, yy, data, levels=line_levels, colors=contour_color, linewidths=0.35)
             ax.clabel(contours, inline=True, fontsize=7, fmt="%.2g")
-    ticks = ELF_COLORBAR_TICKS if label == "ELF" else None
+    ticks = elf_range_levels(color_vmax, color_vmin) if label == "ELF" else None
     colorbar_label = None if label == "ELF" else label
     fig.colorbar(mappable, ax=ax, label=colorbar_label, ticks=ticks)
     ax.set_xlabel("grid")
@@ -3864,6 +3885,13 @@ def cmd_plot_grid(args) -> None:
 
 def cmd_plot_elf(args) -> None:
     mode = getattr(args, "mode", "grid")
+    elf_vmin = 0.0 if getattr(args, "vmin", None) is None else float(args.vmin)
+    elf_vmax = 1.0 if getattr(args, "vmax", None) is None else float(args.vmax)
+    if elf_vmin != 0.0:
+        die("ELF interactive/automatic range currently supports vmin=0 only")
+    if elf_vmax <= elf_vmin:
+        die("ELF range needs --vmax greater than --vmin")
+    default_levels = elf_range_levels(elf_vmax, elf_vmin)
     if mode == "grid":
         args.kind = "elf"
         args.minus = None
@@ -3871,7 +3899,7 @@ def cmd_plot_elf(args) -> None:
         args.cube_out = None
         if args.cmap is None:
             args.cmap = ELF_REFERENCE_CMAP
-        args.levels = ELF_DEFAULT_LEVELS if getattr(args, "levels", None) is None else parse_elf_levels(args.levels, None)
+        args.levels = default_levels if getattr(args, "levels", None) is None else parse_elf_levels(args.levels, None)
         if getattr(args, "out", None) is None:
             prefix = getattr(args, "out_prefix", None) or Path("elf")
             args.out = Path(prefix).with_suffix(".png")
@@ -3883,14 +3911,14 @@ def cmd_plot_elf(args) -> None:
     cell = cell_vectors_from_cube_axes(axes, shape)
     prefix = (args.out_prefix or Path("elf")).expanduser()
     prefix.parent.mkdir(parents=True, exist_ok=True)
-    levels = parse_elf_levels(args.levels, ELF_DEFAULT_LEVELS)
+    levels = parse_elf_levels(args.levels, default_levels)
     size = parse_elf_size(args.size)
     cmap = args.cmap or ELF_REFERENCE_CMAP
     summary_lines = [
         f"ELF mode: {mode}",
         f"cube: {cube_file}",
         f"levels: {levels}",
-        f"ELF color range: 0 to 1",
+        f"ELF color range: {elf_vmin:g} to {elf_vmax:g}",
     ]
 
     if mode == "line":
@@ -4038,12 +4066,12 @@ def cmd_plot_elf(args) -> None:
 
     contourf_out = prefix.with_name(prefix.name + "_contourf.png")
     contour_out = prefix.with_name(prefix.name + "_contour.png")
-    plot_elf_plane_map(contourf_out, u_grid, v_grid, elf, projected, selected_atoms, levels, "contourf", cmap, xlabel, ylabel)
-    plot_elf_plane_map(contour_out, u_grid, v_grid, elf, projected, selected_atoms, levels, "contour", cmap, xlabel, ylabel)
+    plot_elf_plane_map(contourf_out, u_grid, v_grid, elf, projected, selected_atoms, levels, "contourf", cmap, xlabel, ylabel, elf_vmin, elf_vmax)
+    plot_elf_plane_map(contour_out, u_grid, v_grid, elf, projected, selected_atoms, levels, "contour", cmap, xlabel, ylabel, elf_vmin, elf_vmax)
     summary_lines.extend(["outputs:", f"  {contourf_out}", f"  {contour_out}"])
     if args.compare_interp:
         compare_out = prefix.with_name(prefix.name + "_interpolation_compare.png")
-        plot_elf_interpolation_compare(compare_out, values, origin, axes, shape, plane_origin, e_u, e_v, u_range, v_range, size, projected, selected_atoms, levels, cmap, xlabel, ylabel)
+        plot_elf_interpolation_compare(compare_out, values, origin, axes, shape, plane_origin, e_u, e_v, u_range, v_range, size, projected, selected_atoms, levels, cmap, xlabel, ylabel, elf_vmin, elf_vmax)
         summary_lines.append(f"  {compare_out}")
     if profile_info:
         summary_lines.extend(
@@ -5170,7 +5198,7 @@ def interactive_plot_charge_diff() -> None:
     run_interactive_plot_grid("diff", "charge_diff.png")
 
 
-def default_plot_elf_args() -> argparse.Namespace:
+def default_plot_elf_args(elf_vmax: float = 1.0) -> argparse.Namespace:
     return argparse.Namespace(
         path=Path("."),
         file=None,
@@ -5180,7 +5208,7 @@ def default_plot_elf_args() -> argparse.Namespace:
         style="contourf",
         levels=None,
         vmin=0.0,
-        vmax=1.0,
+        vmax=elf_vmax,
         cmap=None,
         title=None,
         contour_color="black",
@@ -5220,21 +5248,21 @@ def interactive_elf_list_atoms() -> None:
         print(f"  {int(atom['idx']):5d}  {str(atom['symbol']):>4s}  {pos[0]:10.5f}  {pos[1]:10.5f}  {pos[2]:10.5f}")
 
 
-def interactive_elf_grid_slice() -> None:
-    args = default_plot_elf_args()
+def interactive_elf_grid_slice(elf_vmax: float = 1.0) -> None:
+    args = default_plot_elf_args(elf_vmax)
     args.mode = "grid"
     args.axis = prompt_choice("Slice axis", ["z", "x", "y"], "z")
     index_text = prompt_text("Slice index, empty for middle", "")
     args.index = int(index_text) if index_text else None
-    args.levels = ELF_DEFAULT_LEVELS_TEXT
+    args.levels = format_elf_levels(elf_range_levels(elf_vmax))
     args.out = Path("elf.png")
     cmd_plot_elf(args)
     print("ELF grid-slice plot finished. Exiting abacuskit.")
     raise ProgramExit
 
 
-def interactive_elf_line_profile() -> None:
-    args = default_plot_elf_args()
+def interactive_elf_line_profile(elf_vmax: float = 1.0) -> None:
+    args = default_plot_elf_args(elf_vmax)
     args.mode = "line"
     atom_a, atom_b = parse_interactive_atom_selectors(prompt_text("Two atoms, e.g. Cu:20,H:97 or 20 97"), 2, "Cu:20,H:97")
     args.atom = atom_a
@@ -5245,28 +5273,28 @@ def interactive_elf_line_profile() -> None:
     raise ProgramExit
 
 
-def interactive_elf_bond_plane() -> None:
-    args = default_plot_elf_args()
+def interactive_elf_bond_plane(elf_vmax: float = 1.0) -> None:
+    args = default_plot_elf_args(elf_vmax)
     args.mode = "bond-plane"
     center, neighbor = parse_interactive_atom_selectors(prompt_text("Center atom and neighbor, e.g. H:97,Cu:auto or H:97 Cu:20"), 2, "H:97,Cu:auto")
     args.atom = center
     args.neighbor = neighbor
     args.profile = True
     args.compare_interp = True
-    args.levels = ELF_DEFAULT_LEVELS_TEXT
+    args.levels = format_elf_levels(elf_range_levels(elf_vmax))
     args.out_prefix = Path("elf_bond_plane")
     cmd_plot_elf(args)
     print("ELF bond-plane plot finished. Exiting abacuskit.")
     raise ProgramExit
 
 
-def interactive_elf_atoms_plane() -> None:
-    args = default_plot_elf_args()
+def interactive_elf_atoms_plane(elf_vmax: float = 1.0) -> None:
+    args = default_plot_elf_args(elf_vmax)
     args.mode = "atoms-plane"
     atoms = parse_interactive_atom_selectors(prompt_text("Three atoms, e.g. H:97,Cu:20,O:68 or 97 20 68"), 3, "H:97,Cu:20,O:68")
     args.atoms = ",".join(atoms)
     args.compare_interp = True
-    args.levels = ELF_DEFAULT_LEVELS_TEXT
+    args.levels = format_elf_levels(elf_range_levels(elf_vmax))
     args.out_prefix = Path("elf_atoms_plane")
     cmd_plot_elf(args)
     print("ELF atoms-plane plot finished. Exiting abacuskit.")
@@ -5274,39 +5302,50 @@ def interactive_elf_atoms_plane() -> None:
 
 
 def interactive_plot_elf() -> None:
-    print(
-        """
+    elf_vmax = 1.0
+    while True:
+        print(
+            f"""
 ---------- 100x: Plot ELF ----------
   1000) List atom indices from elf.cube
   1001) Grid slice: normal x/y/z cube slice
   1002) 1D ELF curve: enter two atoms only
   1003) 2D bond-plane: enter center atom and neighbor only
   1004) 2D atoms-plane: enter three atoms only
+  1005) Set ELF color/contour range: 0-x, current x={elf_vmax:g}
   0) Back to previous menu
   q) Quit abacuskit
 """
-    )
-    choice = prompt_text("Enter 100x option", "1003").lower()
-    if choice in {"q", "quit", "exit"}:
-        raise ProgramExit
-    if choice in {"0", "100"}:
-        return
-    if choice == "1000":
-        interactive_elf_list_atoms()
-        return
-    if choice == "1001":
-        interactive_elf_grid_slice()
-        return
-    if choice == "1002":
-        interactive_elf_line_profile()
-        return
-    if choice == "1003":
-        interactive_elf_bond_plane()
-        return
-    if choice == "1004":
-        interactive_elf_atoms_plane()
-        return
-    print("Unknown 100x option.")
+        )
+        choice = prompt_text("Enter 100x option", "1003").lower()
+        if choice in {"q", "quit", "exit"}:
+            raise ProgramExit
+        if choice in {"0", "100"}:
+            return
+        if choice == "1000":
+            interactive_elf_list_atoms()
+            return
+        if choice == "1001":
+            interactive_elf_grid_slice(elf_vmax)
+            return
+        if choice == "1002":
+            interactive_elf_line_profile(elf_vmax)
+            return
+        if choice == "1003":
+            interactive_elf_bond_plane(elf_vmax)
+            return
+        if choice == "1004":
+            interactive_elf_atoms_plane(elf_vmax)
+            return
+        if choice == "1005":
+            value = prompt_float("ELF upper bound x for color/contour range 0-x", elf_vmax)
+            if value <= 0.0:
+                print("ELF upper bound must be positive.")
+                continue
+            elf_vmax = value
+            print(f"ELF color/contour range set to 0-{elf_vmax:g}; levels: {format_elf_levels(elf_range_levels(elf_vmax))}")
+            continue
+        print("Unknown 100x option.")
 
 
 def interactive_cohp() -> None:
@@ -6042,8 +6081,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--index", type=int, help="slice index; default is the middle slice")
     p.add_argument("--style", choices=["contourf", "contour", "both", "image"], default="contourf", help="ELF 2D plot style")
     p.add_argument("--levels", help="contour levels, e.g. 0.0,0.1,0.2,...,1.0; grid mode also accepts a count")
-    p.add_argument("--vmin", type=float, default=0.0, help="minimum plotted ELF value")
-    p.add_argument("--vmax", type=float, default=1.0, help="maximum plotted ELF value")
+    p.add_argument("--vmin", type=float, default=0.0, help="minimum plotted ELF value; default 0")
+    p.add_argument("--vmax", type=float, default=1.0, help="upper bound x for ELF color/contour range 0-x; default 1")
     p.add_argument("--cmap", help="matplotlib colormap name")
     p.add_argument("--title", help="plot title")
     p.add_argument("--contour-color", default="black", help="contour line color for contour/both styles")
