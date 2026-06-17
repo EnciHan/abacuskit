@@ -3629,8 +3629,7 @@ def plot_elf_plane_map(
     ax.tick_params(direction="out", length=3.5, width=0.8)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes("right", size="5%", pad=0.08)
-    colorbar = fig.colorbar(mappable, cax=cax, ticks=ticks)
-    colorbar.set_label("ELF")
+    fig.colorbar(mappable, cax=cax, ticks=ticks)
     fig.tight_layout()
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
@@ -3672,8 +3671,7 @@ def plot_elf_interpolation_compare(
         ax.set_aspect("equal", adjustable="box")
         ax.set_xlabel(xlabel)
     axes_plot[0].set_ylabel(ylabel)
-    colorbar = fig.colorbar(im, ax=axes_plot.ravel().tolist(), ticks=ELF_COLORBAR_TICKS, pad=0.015)
-    colorbar.set_label("ELF")
+    fig.colorbar(im, ax=axes_plot.ravel().tolist(), ticks=ELF_COLORBAR_TICKS, pad=0.015)
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
 
@@ -3791,7 +3789,8 @@ def plot_grid_slice(
             contours = ax.contour(xx, yy, data, levels=line_levels, colors=contour_color, linewidths=0.35)
             ax.clabel(contours, inline=True, fontsize=7, fmt="%.2g")
     ticks = ELF_COLORBAR_TICKS if label == "ELF" else None
-    fig.colorbar(mappable, ax=ax, label=label, ticks=ticks)
+    colorbar_label = None if label == "ELF" else label
+    fig.colorbar(mappable, ax=ax, label=colorbar_label, ticks=ticks)
     ax.set_xlabel("grid")
     ax.set_ylabel("grid")
     ax.set_title(title or f"{label}, {axis} slice {used_index}")
