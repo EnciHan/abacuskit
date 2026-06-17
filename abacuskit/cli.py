@@ -4166,6 +4166,134 @@ DP="${{DP:-{DEFAULT_DP}}}"
     print(f"wrote {args.out} and {run}")
 
 
+def cmd_plot_mlip_eval(args) -> None:
+    try:
+        from .mlip_eval import MLIPEvalConfig, run_mlip_eval
+    except ImportError:
+        from mlip_eval import MLIPEvalConfig, run_mlip_eval
+
+    config = MLIPEvalConfig(
+        root=args.root,
+        out=args.out,
+        prefix=args.prefix,
+        quantity=args.quantity,
+        natoms=args.natoms,
+        data_dir=args.data_dir,
+        title=args.title,
+        dpi=args.dpi,
+        fmt=args.format,
+        outlier_sigma=args.outlier_sigma,
+        top_outliers=args.top_outliers,
+    )
+    try:
+        result = run_mlip_eval(config)
+    except (FileNotFoundError, ValueError) as exc:
+        die(str(exc))
+    for figure in result["figures"]:
+        print(f"wrote plot {figure}")
+    print(f"wrote summary {result['summary_csv']}")
+    print(f"wrote outliers {result['outliers_csv']}")
+
+
+def _abacus_dpdata_format(job: Path, explicit_fmt: str | None = None) -> str:
+    if explicit_fmt:
+        return explicit_fmt
+    calc = read_input_calculation(job)
+    return f"abacus/{'md' if calc == 'md' else 'relax' if calc == 'relax' else 'scf'}"
+
+
+def iter_job_dirs_recursive(paths: list[Path], max_depth: int = 4) -> list[Path]:
+    jobs: list[Path] = []
+    seen: set[Path] = set()
+    skip = {".git", "__pycache__", "node_modules"}
+    for raw_path in paths:
+        root = raw_path.expanduser()
+        if not root.exists():
+            die(f"path not found: {root}")
+        if find_abacus_input(root) or find_abacus_outdir(root) or find_running_log(root):
+            candidates = [root]
+        else:
+            candidates = []
+            base_depth = len(root.parts)
+            for current, dirs, _ in os.walk(root):
+                current_path = Path(current)
+                depth = len(current_path.parts) - base_depth
+                dirs[:] = [name for name in dirs if name not in skip and not name.startswith(".")]
+                if depth >= max_depth:
+                    dirs[:] = []
+                if find_abacus_input(current_path) or find_abacus_outdir(current_path) or find_running_log(current_path):
+                    candidates.append(current_path)
+                    dirs[:] = []
+        for candidate in candidates:
+            resolved = candidate.resolve()
+            if resolved not in seen:
+                seen.add(resolved)
+                jobs.append(candidate)
+    return sorted(jobs, key=lambda p: natural_key(str(p)))
+
+
+def cmd_screen_raw_data(args) -> None:
+    try:
+        from .bad_data import screen_raw_abacus
+    except ImportError:
+        from bad_data import screen_raw_abacus
+
+    jobs = iter_job_dirs_recursive(args.paths, args.max_depth)
+    if not jobs:
+        die("no ABACUS jobs found")
+    payload = []
+    for job in jobs:
+        payload.append({"job": job, "fmt": _abacus_dpdata_format(job, args.fmt), "status": parse_abacus_status(job)})
+    try:
+        summary = screen_raw_abacus(
+            payload,
+            args.out,
+            max_force=args.max_force,
+            max_abs_energy_per_atom=args.max_abs_energy_per_atom,
+            energy_sigma=args.energy_sigma,
+            force_sigma=args.force_sigma,
+            set_size=args.set_size,
+            keep_unconverged=args.keep_unconverged,
+        )
+    except (ImportError, OSError, ValueError) as exc:
+        die(str(exc))
+    print(f"wrote raw-data screening report to {summary['out']}")
+    print(f"filtered DeepMD data: {summary['deepmd']}")
+    print(f"frames: {summary['frames']}, kept: {summary['kept']}, removed: {summary['removed']}")
+
+
+def cmd_screen_trained_data(args) -> None:
+    try:
+        from .bad_data import find_deepmd_systems, screen_trained_deepmd
+    except ImportError:
+        from bad_data import find_deepmd_systems, screen_trained_deepmd
+
+    systems = find_deepmd_systems(args.paths)
+    if not systems:
+        die("no DeepMD npy systems found")
+    detail_root = args.detail_root if args.detail_root else None
+    try:
+        summary = screen_trained_deepmd(
+            systems,
+            args.out,
+            detail_root=detail_root,
+            detail_prefix=args.prefix,
+            max_force=args.max_force,
+            max_abs_energy_per_atom=args.max_abs_energy_per_atom,
+            energy_sigma=args.energy_sigma,
+            force_sigma=args.force_sigma,
+            max_energy_error=args.max_energy_error,
+            max_force_error=args.max_force_error,
+            energy_error_sigma=args.energy_error_sigma,
+            force_error_sigma=args.force_error_sigma,
+        )
+    except (OSError, ValueError) as exc:
+        die(str(exc))
+    print(f"wrote trained-data screening report to {summary['out']}")
+    print(f"cleaned DeepMD data: {Path(summary['out']) / 'cleaned'}")
+    print(f"frames: {summary['frames']}, kept: {summary['kept']}, removed: {summary['removed']}")
+
+
 def cmd_init_workflow(args) -> None:
     root = args.out
     for sub in ["00_cif", "01_candidates", "02_abacus_sp", "03_deepmd_data", "04_train"]:
@@ -5482,6 +5610,151 @@ def interactive_make_train() -> None:
     cmd_make_train(args)
 
 
+def interactive_plot_mlip_eval() -> None:
+    print("\n[25] Plot MLIP/DeepMD evaluation parity\n")
+    print(
+        """
+  1) Overview: energy + force + stress/virial when available
+  2) Energy only
+  3) Force only
+  4) Stress/virial only
+  5) Custom options
+  0) Back to previous menu
+"""
+    )
+    choice = prompt_choice("MLIP evaluation plot", ["1", "2", "3", "4", "5", "0"], "1")
+    if choice == "0":
+        return
+    quantity = {"1": "all", "2": "energy", "3": "force", "4": "stress"}.get(choice, "all")
+    if choice == "5":
+        quantity = prompt_choice("Quantity", ["all", "energy", "force", "stress", "virial"], "all")
+        natoms_text = prompt_text("Atom count for total-energy conversion, empty for auto", "")
+        data_dir_text = prompt_text("DeepMD data directory for type.raw/box.npy, empty for auto", "")
+        args = argparse.Namespace(
+            root=prompt_path("Training/test directory containing detail.*.out", "."),
+            out=prompt_path("Output directory", "mlip_eval_plots"),
+            prefix=prompt_text("Detail file prefix", "valid"),
+            quantity=quantity,
+            natoms=int(natoms_text) if natoms_text.strip() else None,
+            data_dir=Path(data_dir_text).expanduser() if data_dir_text.strip() else None,
+            title=prompt_text("Overview title, empty for none", "") or None,
+            dpi=prompt_int("Figure DPI", 300),
+            format=prompt_choice("Figure format", ["png", "pdf", "svg"], "png"),
+            outlier_sigma=prompt_float("Outlier sigma threshold", 4.0),
+            top_outliers=prompt_int("Top outliers per quantity", 20),
+        )
+    else:
+        args = argparse.Namespace(
+            root=Path("."),
+            out=Path("mlip_eval_plots"),
+            prefix="valid",
+            quantity=quantity,
+            natoms=None,
+            data_dir=None,
+            title=None,
+            dpi=300,
+            format="png",
+            outlier_sigma=4.0,
+            top_outliers=20,
+        )
+        print("Using defaults: root=., prefix=valid, out=mlip_eval_plots, format=png, dpi=300")
+    cmd_plot_mlip_eval(args)
+
+
+def default_deepmd_screen_paths() -> list[Path]:
+    candidates = [Path("data/train"), Path("data/valid"), Path("train"), Path("valid")]
+    found = [path for path in candidates if path.is_dir()]
+    return found or [Path(".")]
+
+
+def interactive_screen_bad_data() -> None:
+    print("\n[26] View/filter bad data\n")
+    print(
+        """
+  1) Screen untrained ABACUS single-point/AIMD data with defaults
+  2) Screen trained DeepMD data with defaults
+  3) Custom untrained ABACUS screening
+  4) Custom trained DeepMD screening
+  0) Back to previous menu
+"""
+    )
+    choice = prompt_choice("Bad-data screening", ["1", "2", "3", "4", "0"], "1")
+    if choice == "0":
+        return
+    if choice in {"1", "3"}:
+        if choice == "1":
+            args = argparse.Namespace(
+                paths=[Path(".")],
+                out=Path("bad_data_raw_filtered"),
+                fmt=None,
+                max_force=50.0,
+                max_abs_energy_per_atom=None,
+                energy_sigma=6.0,
+                force_sigma=6.0,
+                set_size=5000,
+                keep_unconverged=False,
+                max_depth=4,
+            )
+            print("Using defaults: paths=., out=bad_data_raw_filtered, reject unconverged, max_force=50 eV/Å")
+        else:
+            max_energy_text = prompt_text("Max |energy/atom| in eV, empty for none", "")
+            fmt = prompt_choice("dpdata format", ["auto", "abacus/scf", "abacus/md", "abacus/relax"], "auto")
+            args = argparse.Namespace(
+                paths=[Path(x).expanduser() for x in prompt_multi("ABACUS job/root paths")] or [Path(".")],
+                out=prompt_path("Output directory", "bad_data_raw_filtered"),
+                fmt=None if fmt == "auto" else fmt,
+                max_force=prompt_float("Max absolute force in eV/Å", 50.0),
+                max_abs_energy_per_atom=float(max_energy_text) if max_energy_text.strip() else None,
+                energy_sigma=prompt_float("Energy robust-sigma threshold", 6.0),
+                force_sigma=prompt_float("Force robust-sigma threshold", 6.0),
+                set_size=prompt_int("DeepMD set size", 5000),
+                keep_unconverged=prompt_yes_no("Keep unconverged jobs?", False),
+                max_depth=prompt_int("Recursive search max depth", 4),
+            )
+        cmd_screen_raw_data(args)
+        return
+
+    if choice == "2":
+        args = argparse.Namespace(
+            paths=default_deepmd_screen_paths(),
+            out=Path("bad_data_trained_clean"),
+            detail_root=Path("."),
+            prefix="auto",
+            max_force=50.0,
+            max_abs_energy_per_atom=None,
+            energy_sigma=6.0,
+            force_sigma=6.0,
+            max_energy_error=None,
+            max_force_error=None,
+            energy_error_sigma=6.0,
+            force_error_sigma=6.0,
+        )
+        print(
+            "Using defaults: paths=data/train,data/valid when present, "
+            "out=bad_data_trained_clean, detail_root=., prefix=auto"
+        )
+    else:
+        max_energy_text = prompt_text("Max |energy/atom| in eV, empty for none", "")
+        max_energy_error_text = prompt_text("Max energy residual in meV/atom, empty for sigma only", "")
+        max_force_error_text = prompt_text("Max force residual in eV/Å, empty for sigma only", "")
+        detail_root_text = prompt_text("Training result directory with detail.*.out, empty for none", ".")
+        args = argparse.Namespace(
+            paths=[Path(x).expanduser() for x in prompt_multi("DeepMD system/root paths")] or default_deepmd_screen_paths(),
+            out=prompt_path("Output directory", "bad_data_trained_clean"),
+            detail_root=Path(detail_root_text).expanduser() if detail_root_text.strip() else None,
+            prefix=prompt_choice("Detail prefix", ["auto", "train", "valid"], "auto"),
+            max_force=prompt_float("Max absolute force in eV/Å", 50.0),
+            max_abs_energy_per_atom=float(max_energy_text) if max_energy_text.strip() else None,
+            energy_sigma=prompt_float("Label energy robust-sigma threshold", 6.0),
+            force_sigma=prompt_float("Label force robust-sigma threshold", 6.0),
+            max_energy_error=float(max_energy_error_text) if max_energy_error_text.strip() else None,
+            max_force_error=float(max_force_error_text) if max_force_error_text.strip() else None,
+            energy_error_sigma=prompt_float("Energy residual robust-sigma threshold", 6.0),
+            force_error_sigma=prompt_float("Force residual robust-sigma threshold", 6.0),
+        )
+    cmd_screen_trained_data(args)
+
+
 def interactive_init_workflow() -> None:
     print("\n[22] Init workflow skeleton\n")
     args = argparse.Namespace(out=prompt_path("Workflow root directory", "abacus_deepmd_project"))
@@ -5734,6 +6007,8 @@ Affiliation: {__affiliation__}
 
   23) Search/save APNS pseudopotential and orbital paths
   24) Plot BAND + PDOS in current directory
+  25) Plot MLIP/DeepMD evaluation parity
+  26) View/filter bad data
   h) Show command-line help
   q) Quit abacuskit
   0) Exit
@@ -5767,6 +6042,8 @@ def interactive_menu() -> None:
         "22": interactive_init_workflow,
         "23": interactive_config_apns_paths,
         "24": interactive_plot_band_pdos,
+        "25": interactive_plot_mlip_eval,
+        "26": interactive_screen_bad_data,
     }
     while True:
         print_interactive_menu()
@@ -6133,6 +6410,48 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--steps", type=int, default=100000)
     p.add_argument("--out", type=Path, required=True)
     p.set_defaults(func=cmd_make_train)
+
+    p = sub.add_parser("plot-mlip-eval", help="plot DeepMD/MLIP energy, force, and stress parity diagnostics")
+    p.add_argument("root", type=Path, nargs="?", default=Path("."), help="directory containing detail.<prefix>.*.out files")
+    p.add_argument("--prefix", default="valid", help="DeepMD detail file prefix, e.g. valid or train")
+    p.add_argument("--out", type=Path, default=Path("mlip_eval_plots"), help="output plot/report directory")
+    p.add_argument("--quantity", choices=["all", "energy", "force", "stress", "virial"], default="all")
+    p.add_argument("--natoms", type=int, help="atom count for converting total energy to eV/atom when e_peratom is absent")
+    p.add_argument("--data-dir", type=Path, help="DeepMD data directory used to infer type.raw and box.npy")
+    p.add_argument("--title", help="overview figure title")
+    p.add_argument("--dpi", type=int, default=300)
+    p.add_argument("--format", choices=["png", "pdf", "svg"], default="png")
+    p.add_argument("--outlier-sigma", type=float, default=4.0, help="mark outliers beyond this residual sigma")
+    p.add_argument("--top-outliers", type=int, default=20, help="top residual rows exported per quantity")
+    p.set_defaults(func=cmd_plot_mlip_eval)
+
+    p = sub.add_parser("screen-raw-data", help="screen untrained ABACUS single-point/AIMD data and write filtered DeepMD data")
+    p.add_argument("paths", type=Path, nargs="*", default=[Path(".")], help="ABACUS job directories or roots; default current directory")
+    p.add_argument("--out", type=Path, default=Path("bad_data_raw_filtered"), help="output report/data directory; existing paths get a numeric suffix")
+    p.add_argument("--fmt", choices=["abacus/scf", "abacus/md", "abacus/relax"], help="force dpdata input format; default infers from INPUT calculation")
+    p.add_argument("--max-force", type=float, default=50.0, help="reject frames with any |force| above this eV/Å value")
+    p.add_argument("--max-abs-energy-per-atom", type=float, help="reject frames with |energy/atom| above this eV value")
+    p.add_argument("--energy-sigma", type=float, default=6.0, help="robust sigma threshold for energy/atom outliers")
+    p.add_argument("--force-sigma", type=float, default=6.0, help="robust sigma threshold for max-force outliers")
+    p.add_argument("--set-size", type=int, default=5000, help="DeepMD npy set size for accepted frames")
+    p.add_argument("--keep-unconverged", action="store_true", help="try loading jobs even when convergence was not detected")
+    p.add_argument("--max-depth", type=int, default=4, help="recursive directory search depth for ABACUS jobs")
+    p.set_defaults(func=cmd_screen_raw_data)
+
+    p = sub.add_parser("screen-trained-data", help="screen trained DeepMD datasets and write cleaned copies without overwriting originals")
+    p.add_argument("paths", type=Path, nargs="*", default=[Path(".")], help="DeepMD npy systems or roots; default current directory")
+    p.add_argument("--out", type=Path, default=Path("bad_data_trained_clean"), help="output report/data directory; existing paths get a numeric suffix")
+    p.add_argument("--detail-root", type=Path, default=Path("."), help="directory containing detail.<prefix>.*.out; pass empty only via Python API")
+    p.add_argument("--prefix", choices=["auto", "train", "valid"], default="auto", help="detail file prefix used for residual screening")
+    p.add_argument("--max-force", type=float, default=50.0, help="reject frames with any |force| above this eV/Å value")
+    p.add_argument("--max-abs-energy-per-atom", type=float, help="reject frames with |energy/atom| above this eV value")
+    p.add_argument("--energy-sigma", type=float, default=6.0, help="robust sigma threshold for label energy/atom outliers")
+    p.add_argument("--force-sigma", type=float, default=6.0, help="robust sigma threshold for label max-force outliers")
+    p.add_argument("--max-energy-error", type=float, help="reject frames with energy residual above this meV/atom value")
+    p.add_argument("--max-force-error", type=float, help="reject frames with max atomic force residual above this eV/Å value")
+    p.add_argument("--energy-error-sigma", type=float, default=6.0, help="robust sigma threshold for energy residual outliers")
+    p.add_argument("--force-error-sigma", type=float, default=6.0, help="robust sigma threshold for force residual outliers")
+    p.set_defaults(func=cmd_screen_trained_data)
 
     p = sub.add_parser("init-workflow", help="create a standard workflow directory skeleton")
     p.add_argument("--out", type=Path, required=True)

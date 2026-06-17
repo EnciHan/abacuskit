@@ -120,6 +120,8 @@ abacuskit
 
 23   Search/save APNS pseudopotential and orbital paths
 24   Plot BAND + PDOS in current directory
+25   Plot MLIP/DeepMD evaluation parity
+26   View/filter bad data
 ```
 
 常用的 CIF 转 STRU 菜单流程：
@@ -736,7 +738,64 @@ bash run_deepmd.sh
 --type-map C H O Ni
 ```
 
-## 16. 一键生成流程骨架
+## 16. DeepMD 势函数训练后评估出图
+
+`plot-mlip-eval` 读取 `dp test -d` 或相同格式生成的 `detail.valid.e.out`、`detail.valid.f.out`、`detail.valid.v.out` 文件，生成能量、力、应力/位力 parity 图、残差直方图、`R^2`、MAE、RMSE、数据点数量和异常点 CSV。
+
+```bash
+abacuskit plot-mlip-eval 04_train/000 \
+  --prefix valid \
+  --out mlip_eval_plots \
+  --data-dir 03_deepmd_data/valid
+```
+
+默认输出：
+
+- `valid_mlip_eval_overview.png`：能量、力、应力/位力合并大图；如果没有可用位力参考数据，只生成能量和力。
+- `energy/valid_energy_parity.png`、`force/valid_force_parity.png`、`stress/valid_stress_parity.png`：二级目录中的单项图。
+- `summary.csv` / `summary.json`：每个物理量的 `R^2`、MAE、RMSE、数据点数量和单位。
+- `outliers.csv`：按残差排序的异常点信息。
+
+也可以只生成单项：
+
+```bash
+abacuskit plot-mlip-eval 04_train/000 --quantity energy
+abacuskit plot-mlip-eval 04_train/000 --quantity force
+abacuskit plot-mlip-eval 04_train/000 --quantity stress
+```
+
+能量指标单位为 `meV/atom`，力指标单位为 `meV/Å`，应力指标单位为 `GPa`；图中预测值纵轴使用 `DP` 标题。
+
+## 17. 坏数据查看与筛选
+
+菜单 `26` 提供两个默认二级功能：
+
+- `1`：在当前路径筛选还未训练的 ABACUS 单点、relax、AIMD 输出，默认剔除未收敛任务和力/能量异常帧，输出新的 DeepMD 数据目录。
+- `2`：在当前路径筛选已经训练过的 DeepMD 数据，结合 `detail.train.*.out` / `detail.valid.*.out` 残差和原始标签异常值，生成 cleaned 副本，不覆盖原数据集。
+
+命令行也可以直接使用：
+
+```bash
+abacuskit screen-raw-data 02_abacus_sp \
+  --out bad_data_raw_filtered
+
+abacuskit screen-trained-data data/train data/valid \
+  --detail-root 04_train/000 \
+  --prefix auto \
+  --out bad_data_trained_clean
+```
+
+输出目录如果已经存在，程序会自动加 `_001`、`_002` 这类后缀，避免覆盖以前的数据。主要输出包括：
+
+- `summary.json`：总帧数、保留帧数、剔除帧数和输出位置。
+- `jobs.csv`：原始 ABACUS 筛选时每个任务的收敛/加载/保留情况。
+- `frames.csv`：每一帧的能量、能量/原子、最大力和保留状态。
+- `rejected_frames.csv`：被剔除帧及原因，例如 `not_converged`、`max_force`、`energy_error_outlier`。
+- `deepmd/` 或 `cleaned/`：筛选后的新数据集副本。
+
+默认会递归扫描 4 层目录寻找 ABACUS 任务。默认阈值偏保守：最大力 `50 eV/Å`，能量和力异常使用 robust sigma `6.0`。需要更严格时可加 `--max-force`、`--energy-sigma`、`--force-sigma`、`--max-energy-error`、`--max-force-error`；需要调整扫描深度时用 `--max-depth`。
+
+## 18. 一键生成流程骨架
 
 ```bash
 abacuskit init-workflow --out my_abacus_deepmd_project
