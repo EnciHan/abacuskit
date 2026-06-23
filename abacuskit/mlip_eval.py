@@ -24,6 +24,7 @@ class MLIPEvalConfig:
     quantity: str = "all"
     natoms: int | None = None
     data_dir: Path | None = None
+    input_file: Path | None = None
     title: str | None = None
     dpi: int = 300
     fmt: str = "png"
@@ -152,6 +153,107 @@ def _load_energy(root: Path, prefix: str, natoms: int | None, data_dir: Path | N
         metric_unit="meV/atom",
         ref=data[:, 0] / atoms,
         pred=data[:, 1] / atoms,
+    )
+
+
+def _deepmd_frame_count(system: Path) -> int:
+    total = 0
+    for set_dir in sorted(system.expanduser().glob("set.*")):
+        if not set_dir.is_dir():
+            continue
+        for name in ("energy.npy", "coord.npy", "force.npy", "box.npy"):
+            path = set_dir / name
+            if path.is_file():
+                total += int(np.load(path, mmap_mode="r").shape[0])
+                break
+    return total
+
+
+def _resolve_system_path(item: str, base: Path) -> Path:
+    path = Path(item).expanduser()
+    if path.is_absolute():
+        return path
+    return (base / path).resolve()
+
+
+def _energy_systems_from_input(root: Path, prefix: str, input_file: Path | None) -> list[Path]:
+    input_path = input_file.expanduser() if input_file is not None else root / "input.json"
+    if not input_path.is_file():
+        return []
+    data = json.loads(input_path.read_text())
+    training = data.get("training") if isinstance(data, dict) else None
+    if not isinstance(training, dict):
+        return []
+    prefix_key = prefix.lower()
+    if prefix_key.startswith(("valid", "validation")):
+        section_name = "validation_data"
+    elif prefix_key.startswith(("train", "training")):
+        section_name = "training_data"
+    else:
+        return []
+    section = training.get(section_name)
+    if not isinstance(section, dict):
+        return []
+    systems = section.get("systems")
+    if systems is None:
+        return []
+    if isinstance(systems, str):
+        systems = [systems]
+    if not isinstance(systems, list):
+        return []
+    return [_resolve_system_path(str(item), input_path.parent) for item in systems]
+
+
+def _energy_system_slices(
+    root: Path,
+    prefix: str,
+    rows: int,
+    input_file: Path | None,
+    data_dir: Path | None,
+) -> list[slice]:
+    systems = _energy_systems_from_input(root, prefix, input_file)
+    if not systems and data_dir is not None:
+        systems = [data_dir.expanduser()]
+    if not systems:
+        raise ValueError(
+            "relative-energy plot needs DeepMD system boundaries; pass --input pointing to input.json "
+            "or --data-dir for a single-system detail file"
+        )
+    counts = [_deepmd_frame_count(system) for system in systems]
+    if any(count <= 0 for count in counts):
+        bad = ", ".join(str(system) for system, count in zip(systems, counts) if count <= 0)
+        raise ValueError(f"cannot determine frame count for DeepMD system(s): {bad}")
+    total = sum(counts)
+    if total != rows:
+        detail = ", ".join(f"{system}:{count}" for system, count in zip(systems, counts))
+        raise ValueError(
+            f"relative-energy system frame count mismatch for prefix {prefix!r}: "
+            f"detail has {rows} rows but systems have {total} frames ({detail})"
+        )
+    slices: list[slice] = []
+    start = 0
+    for count in counts:
+        stop = start + count
+        slices.append(slice(start, stop))
+        start = stop
+    return slices
+
+
+def _relative_energy(quantity: QuantityData, root: Path, prefix: str, input_file: Path | None, data_dir: Path | None) -> QuantityData:
+    ref = quantity.ref.astype(float, copy=True)
+    pred = quantity.pred.astype(float, copy=True)
+    for region in _energy_system_slices(root, prefix, ref.size, input_file, data_dir):
+        ref[region] -= float(np.mean(ref[region]))
+        pred[region] -= float(np.mean(pred[region]))
+    return QuantityData(
+        key="relative_energy",
+        title="Relative Energy",
+        ref_label="DFT relative energy",
+        pred_label="DP relative energy",
+        axis_unit=quantity.axis_unit,
+        metric_unit=quantity.metric_unit,
+        ref=ref,
+        pred=pred,
     )
 
 
@@ -317,7 +419,7 @@ def _panel(fig, spec, quantity: QuantityData, color: str, letter: str | None = N
     residual = quantity.residual
     lo, hi = _axis_limits(ref, pred)
 
-    ax.scatter(ref, pred, s=12 if quantity.key == "energy" else 7, color=color, alpha=0.45, linewidths=0)
+    ax.scatter(ref, pred, s=12 if quantity.key in {"energy", "relative_energy"} else 7, color=color, alpha=0.45, linewidths=0)
     ax.plot([lo, hi], [lo, hi], color="0.5", lw=1.5, ls="--")
     ax.set_xlim(lo, hi)
     ax.set_ylim(lo, hi)
@@ -377,7 +479,7 @@ def _write_figure(path: Path, quantities: list[QuantityData], title: str | None,
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    colors = {"energy": "#1f77b4", "force": "#2ca02c", "stress": "#ff7f0e", "virial": "#ff7f0e"}
+    colors = {"energy": "#1f77b4", "relative_energy": "#1f77b4", "force": "#2ca02c", "stress": "#ff7f0e", "virial": "#ff7f0e"}
     fig = plt.figure(figsize=(5.2 * len(quantities), 5.2), dpi=dpi)
     grid = fig.add_gridspec(1, len(quantities), wspace=0.34)
     for idx, quantity in enumerate(quantities):
@@ -460,15 +562,54 @@ def _filter_quantities(quantities: Iterable[QuantityData], choice: str) -> list[
     all_quantities = list(quantities)
     if choice == "all":
         return all_quantities
-    aliases = {"virial": {"virial", "stress"}, "stress": {"virial", "stress"}}
+    aliases = {
+        "virial": {"virial", "stress"},
+        "stress": {"virial", "stress"},
+        "relative-energy": {"relative_energy"},
+        "relative-energy-force": {"relative_energy", "force"},
+    }
     wanted = aliases.get(choice, {choice})
     return [quantity for quantity in all_quantities if quantity.key in wanted]
+
+
+def _missing_data_message(root: Path, prefix: str, quantity: str) -> str:
+    expected = [
+        f"detail.{prefix}.e_peratom.out or detail.{prefix}.e.out",
+        f"detail.{prefix}.f.out",
+        f"detail.{prefix}.v.out (optional; skipped when missing or reference virial is zero)",
+    ]
+    existing = sorted(path.name for path in root.glob(f"detail.{prefix}.*.out"))
+    lines = [
+        f"no {quantity!r} evaluation data found under {root.resolve()}",
+        f"plot-mlip-eval reads existing dp-test detail files from this directory with prefix {prefix!r}.",
+        "Expected files:",
+        *[f"  - {item}" for item in expected],
+    ]
+    if existing:
+        lines.extend(["Existing matching detail files:", *[f"  - {name}" for name in existing]])
+    else:
+        lines.append("Existing matching detail files: none")
+    if not (root / "frozen_model.pt2").is_file():
+        lines.append("No frozen_model.pt2 was found here. Freeze the checkpoint first, for example:")
+        lines.append("  dp --pt freeze -o frozen_model")
+    lines.extend(
+        [
+            "Then generate validation detail files, for example:",
+            "  dp --pt-expt test -m frozen_model.pt2 -s /path/to/data/valid -n <frames> -d detail",
+            "  for name in e e_peratom f v v_peratom; do [ -f detail.${name}.out ] && mv detail.${name}.out detail.valid.${name}.out; done",
+            "Use --prefix train, or menu 25 -> 5 and choose train, if you want to plot detail.train.*.out instead.",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def load_mlip_eval_data(config: MLIPEvalConfig) -> list[QuantityData]:
     root = config.root.expanduser()
     quantities: list[QuantityData] = []
+    relative_energy = config.quantity in {"relative-energy", "relative_energy", "relative-energy-force"}
     energy = _load_energy(root, config.prefix, config.natoms, config.data_dir)
+    if energy is not None and relative_energy:
+        energy = _relative_energy(energy, root, config.prefix, config.input_file, config.data_dir)
     force = _load_force(root, config.prefix)
     stress = _load_stress(root, config.prefix, config.data_dir)
     for item in (energy, force, stress):
@@ -476,7 +617,7 @@ def load_mlip_eval_data(config: MLIPEvalConfig) -> list[QuantityData]:
             quantities.append(item)
     selected = _filter_quantities(quantities, config.quantity)
     if not selected:
-        raise ValueError(f"no {config.quantity!r} evaluation data found under {root}")
+        raise ValueError(_missing_data_message(root, config.prefix, config.quantity))
     return selected
 
 
@@ -486,7 +627,7 @@ def run_mlip_eval(config: MLIPEvalConfig) -> dict[str, object]:
     quantities = load_mlip_eval_data(config)
 
     figure_paths: list[Path] = []
-    if config.quantity == "all":
+    if len(quantities) > 1:
         figure_paths.append(_write_figure(out / f"{config.prefix}_mlip_eval_overview.{config.fmt}", quantities, config.title, config.dpi))
 
     for quantity in quantities:

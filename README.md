@@ -4,9 +4,16 @@
 
 `abacuskit` 是一个集成式 ABACUS + DeepMD 命令行程序，用于生成 ABACUS 输入文件、准备批量任务、检查/汇总计算结果，并把 ABACUS 输出转换为 DeepMD 数据。
 
-- Version: v1.2.4
+- Version: v1.2.5
 - Author: Han Enci, Zhong Lisheng, Yu Yutong, Xu Mengting, Chen Jingyuan
 - Affiliation: Xi'an University of Technology
+
+## v1.2.5 更新记录
+
+- 新增 DeepMD/MLIP 相对能量 parity 图：按每个 system 内能量均值归零后绘制，并保持原能量 parity 图的样式与配色。
+- 菜单 `25 -> 5` 改为 `valid/train` 数据集开关，菜单 `25 -> 6` 默认同时输出 `valid` 和 `train` 的相对能量与力 parity 图。
+- 增强 MLIP 评估图缺失数据提示，并新增 `make-mlip-detail` 生成 train/valid detail 文件入口。
+- 新增 Streamlit 可视化辅助脚本 `abacuskit_visual.py`，用于浏览 ABACUS 任务状态和汇总信息。
 
 ## v1.2.4 更新记录
 
@@ -740,7 +747,20 @@ bash run_deepmd.sh
 
 ## 16. DeepMD 势函数训练后评估出图
 
-`plot-mlip-eval` 读取 `dp test -d` 或相同格式生成的 `detail.valid.e.out`、`detail.valid.f.out`、`detail.valid.v.out` 文件，生成能量、力、应力/位力 parity 图、残差直方图、`R^2`、MAE、RMSE、数据点数量和异常点 CSV。
+菜单 `25` 可以先生成评估明细，再出图。进入训练目录后，选择 `25 -> 7` 会自动读取当前目录的 `input.json`，如果没有 `frozen_model.pt2` 就先执行 freeze，然后对训练集和验证集运行 `dp test -d detail`，生成 `detail.train.*.out` 和 `detail.valid.*.out`。
+
+命令行等价用法：
+
+```bash
+cd 04_train/000
+abacuskit make-mlip-detail --overwrite
+```
+
+菜单 `25 -> 1` 会自动读取当前目录已有的 `detail.valid.*.out` 和 `detail.train.*.out`，有哪个就画哪个：验证集输出到 `mlip_eval_plots/`，训练集输出到 `mlip_eval_train_plots/`。菜单 `25 -> 5` 是 `valid/train` 开关，用默认参数只画选中的一个集合。
+
+菜单 `25 -> 6` 默认同时处理 `valid` 和 `train`，输出相对能量与力的 parity 图：验证集写到 `mlip_eval_relative_plots/`，训练集写到 `mlip_eval_train_relative_plots/`。
+
+`plot-mlip-eval` 读取 `dp test -d` 或上一步生成的 `detail.valid.e.out`、`detail.valid.f.out`、`detail.valid.v.out` 文件，生成能量、力、应力/位力 parity 图、残差直方图、`R^2`、MAE、RMSE、数据点数量和异常点 CSV。
 
 ```bash
 abacuskit plot-mlip-eval 04_train/000 \
@@ -760,9 +780,13 @@ abacuskit plot-mlip-eval 04_train/000 \
 
 ```bash
 abacuskit plot-mlip-eval 04_train/000 --quantity energy
+abacuskit plot-mlip-eval 04_train/000 --quantity relative-energy
+abacuskit plot-mlip-eval 04_train/000 --quantity relative-energy-force
 abacuskit plot-mlip-eval 04_train/000 --quantity force
 abacuskit plot-mlip-eval 04_train/000 --quantity stress
 ```
+
+`relative-energy` 会按 `input.json` 中当前 prefix 对应的 `training_data.systems` 或 `validation_data.systems` 顺序切分 `detail.<prefix>.e_peratom.out` / `detail.<prefix>.e.out`，并在每个 system 内分别对 DFT 和 DP 能量减去本 system 平均值后再画 parity 图；图形样式、配色和普通能量 parity 保持一致。如果没有 `input.json`，单 system 文件可以用 `--data-dir` 指定该 system。
 
 能量指标单位为 `meV/atom`，力指标单位为 `meV/Å`，应力指标单位为 `GPa`；图中预测值纵轴使用 `DP` 标题。
 

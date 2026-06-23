@@ -35,7 +35,7 @@ try:
     from .bader import run_bader_analysis, write_bader_csv, write_bader_json
     from .cohp import build_orbital_map, format_orbital_map, resolve_orbital_arguments, run_cohp
 except ImportError:
-    __version__ = "v1.2.4"
+    __version__ = "v1.2.5"
     __author__ = "Han Enci, Zhong Lisheng, Yu Yutong, Xu Mengting, Chen Jingyuan"
     __affiliation__ = "Xi'an University of Technology"
     from bader import run_bader_analysis, write_bader_csv, write_bader_json
@@ -202,6 +202,14 @@ ORBITAL_COLORS = {
     "f": "#9467bd",
     "g": "#8c564b",
 }
+DEFAULT_PDOS_SELECTORS = [("C", "p"), ("N", "p"), ("Ru", "d")]
+PDOS_CHANNEL_COLORS = {
+    ("C", "p"): "#1f77b4",
+    ("N", "p"): "#ff7f0e",
+    ("Ru", "d"): "#2ca02c",
+}
+DOS_PLOT_EMIN = -10.0
+DOS_PLOT_EMAX = 8.0
 DFTU_KEYS = (
     "dft_plus_u",
     "orbital_corr",
@@ -3002,6 +3010,355 @@ def set_energy_ticks(ax, emin: float, emax: float) -> None:
     ax.set_yticks(np.linspace(emin, emax, 5))
 
 
+def companion_output_path(path: Path, suffix: str) -> Path:
+    return path.with_name(f"{path.stem}_{suffix}{path.suffix}")
+
+
+def parse_dos_energy_window(root: Path) -> tuple[float | None, float | None, float | None, Path | None]:
+    search_roots = [root.parent if root.is_file() else root]
+    outdir = find_abacus_outdir(search_roots[0])
+    if outdir:
+        search_roots.append(outdir)
+    logs: list[Path] = []
+    for base in search_roots:
+        if base.is_file() and base.name.startswith("running_"):
+            logs.append(base)
+        elif base.is_dir():
+            logs.extend(sorted(base.glob("running_*.log"), key=lambda p: (p.stat().st_mtime, natural_key(p.name))))
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for log in logs:
+        resolved = log.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            unique.append(log)
+    for log in reversed(unique):
+        text = log.read_text(errors="ignore")
+        emin = parse_last_float(r"Minimal energy \(eV\)\s*=\s*([-+0-9.eE]+)", text)
+        emax = parse_last_float(r"Maximal energy \(eV\)\s*=\s*([-+0-9.eE]+)", text)
+        delta = parse_last_float(r"Energy interval \(eV\)\s*=\s*([-+0-9.eE]+)", text)
+        if emin is not None and emax is not None and delta is not None and delta > 0.0:
+            return emin, emax, delta, log
+    return None, None, None, None
+
+
+def ldos_energy_axis(root: Path, nenergy: int, fermi: float | None) -> tuple[np.ndarray, str, str]:
+    emin, _, delta, log = parse_dos_energy_window(root)
+    if emin is not None and delta is not None:
+        energy = emin + np.arange(nenergy, dtype=float) * delta
+        shifted, xlabel = maybe_shift_fermi(energy, fermi)
+        source = f"energy grid from {log}" if log else "energy grid from running log"
+        return shifted, xlabel, source
+    return np.arange(nenergy, dtype=float), "Energy grid index", "energy grid not found; used column index"
+
+
+def parse_ldos_bias(path: Path) -> float | None:
+    match = re.search(r"LDOS_([-+0-9.eE]+)eV", path.name)
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
+def find_ldos_cube_files(root: Path) -> list[Path]:
+    if root.is_file():
+        return [root] if root.suffix.lower() == ".cube" else []
+    outdir = resolve_out_path(root)
+    files = [p for p in outdir.glob("LDOS_*eV.cube") if p.is_file()]
+    return sorted(files, key=lambda p: (parse_ldos_bias(p) is None, parse_ldos_bias(p) or 0.0, natural_key(p.name)))
+
+
+def plot_ldos_matrix(
+    data: np.ndarray,
+    energy: np.ndarray,
+    xlabel: str,
+    out: Path,
+    source_name: str,
+) -> list[Path]:
+    import matplotlib.pyplot as plt
+
+    filled_out = out
+    curve_out = companion_output_path(out, "curve")
+    if data.ndim != 2 or data.size == 0:
+        die("LDOS matrix must be a non-empty 2D table")
+    fig, ax = plt.subplots(figsize=(7.0, 4.6), dpi=180)
+    y = np.arange(data.shape[0], dtype=float)
+    if energy.size == data.shape[1] and energy.size > 1:
+        mesh = ax.contourf(energy, y, data, levels=80, cmap="turbo")
+    else:
+        mesh = ax.imshow(data, origin="lower", aspect="auto", cmap="turbo")
+    fig.colorbar(mesh, ax=ax, label="LDOS")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Path point")
+    ax.set_title(f"LDOS map: {source_name}")
+    fig.tight_layout()
+    fig.savefig(filled_out)
+    plt.close(fig)
+
+    profile = np.nanmean(data, axis=0)
+    x = energy if energy.size == profile.size else np.arange(profile.size, dtype=float)
+    fig, ax = plt.subplots(figsize=(6.4, 4.2), dpi=180)
+    ax.plot(x, profile, lw=1.5, color="#1f77b4", label="path-averaged LDOS")
+    ax.fill_between(x, profile, 0.0, color="#1f77b4", alpha=0.25, linewidth=0)
+    if xlabel.startswith("Energy"):
+        ax.axvline(0.0, lw=0.8, ls="--", color="0.25")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("LDOS")
+    ax.set_title(f"LDOS curve: {source_name}")
+    ax.legend(frameon=False)
+    ax.grid(alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(curve_out)
+    plt.close(fig)
+    return [filled_out, curve_out]
+
+
+def plot_ldos_cube(
+    cube_file: Path,
+    out: Path,
+    cube_files: list[Path] | None = None,
+) -> list[Path]:
+    import matplotlib.pyplot as plt
+
+    values = read_cube_values(cube_file)
+    filled_out = out
+    curve_out = companion_output_path(out, "curve")
+    plane = values[:, :, values.shape[2] // 2]
+    fig, ax = plt.subplots(figsize=(6.4, 5.0), dpi=180)
+    mesh = ax.contourf(plane.T, levels=80, cmap="turbo")
+    fig.colorbar(mesh, ax=ax, label="LDOS")
+    ax.set_xlabel("grid x")
+    ax.set_ylabel("grid y")
+    ax.set_title(f"LDOS filled slice: {cube_file.name}")
+    fig.tight_layout()
+    fig.savefig(filled_out)
+    plt.close(fig)
+
+    biases: list[float] = []
+    averages: list[float] = []
+    for path in cube_files or []:
+        bias = parse_ldos_bias(path)
+        if bias is None:
+            continue
+        biases.append(bias)
+        averages.append(float(np.nanmean(read_cube_values(path))))
+    fig, ax = plt.subplots(figsize=(6.4, 4.2), dpi=180)
+    if biases:
+        order = np.argsort(np.array(biases))
+        x = np.array(biases, dtype=float)[order]
+        y = np.array(averages, dtype=float)[order]
+        ax.plot(x, y, lw=1.5, color="#1f77b4", marker="o", label="cell-averaged LDOS")
+        ax.fill_between(x, y, 0.0, color="#1f77b4", alpha=0.25, linewidth=0)
+        ax.set_xlabel("Bias (eV)")
+        ax.set_ylabel("Average LDOS")
+    else:
+        center_line = plane[:, plane.shape[1] // 2]
+        x = np.arange(center_line.size, dtype=float)
+        ax.plot(x, center_line, lw=1.5, color="#1f77b4", label="center-line LDOS")
+        ax.fill_between(x, center_line, 0.0, color="#1f77b4", alpha=0.25, linewidth=0)
+        ax.set_xlabel("grid x")
+        ax.set_ylabel("LDOS")
+    ax.set_title(f"LDOS curve: {cube_file.name}")
+    ax.legend(frameon=False)
+    ax.grid(alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(curve_out)
+    plt.close(fig)
+    return [filled_out, curve_out]
+
+
+def read_cube_grid_with_atoms_unclipped(
+    path: Path,
+    values: bool = True,
+) -> tuple[list[str], list[dict[str, object]], np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:
+    with path.open(errors="ignore") as handle:
+        header = [next(handle).rstrip("\n") for _ in range(6)]
+        natoms = abs(int(float(header[2].split()[0])))
+        origin = np.array([float(x) for x in header[2].split()[1:4]], dtype=float)
+        shape: list[int] = []
+        axes: list[list[float]] = []
+        raw_counts: list[int] = []
+        for line in header[3:6]:
+            parts = line.split()
+            count = int(float(parts[0]))
+            raw_counts.append(count)
+            shape.append(abs(count))
+            axes.append([float(x) for x in parts[1:4]])
+        unit_to_bohr = 1.0 / BOHR_TO_ANGSTROM if any(count < 0 for count in raw_counts) else 1.0
+        origin = origin * unit_to_bohr
+        axes_array = np.array(axes, dtype=float) * unit_to_bohr
+        atoms: list[dict[str, object]] = []
+        for idx in range(1, natoms + 1):
+            parts = next(handle).split()
+            z_number = int(float(parts[0]))
+            atoms.append(
+                {
+                    "idx": idx,
+                    "z": z_number,
+                    "symbol": atomic_symbol_from_z(z_number),
+                    "pos": np.array([float(x) for x in parts[2:5]], dtype=float) * unit_to_bohr,
+                }
+            )
+        shape_array = np.array(shape, dtype=int)
+        if not values:
+            return header, atoms, origin, axes_array, shape_array, None
+        need = int(np.prod(shape_array))
+        data = np.fromstring(handle.read(), sep=" ", dtype=float, count=need)
+    if values and (data.size < int(np.prod(shape_array))):
+        die(f"cube file has {data.size} values, expected {int(np.prod(shape_array))}: {path}")
+    return header, atoms, origin, axes_array, shape_array, data.reshape(tuple(shape_array))
+
+
+def sample_cube_on_line(
+    values: np.ndarray,
+    origin: np.ndarray,
+    axes: np.ndarray,
+    shape: np.ndarray,
+    start: np.ndarray,
+    end: np.ndarray,
+    npoints: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    try:
+        from scipy.ndimage import map_coordinates
+    except ImportError:
+        die("LDOS line sampling needs scipy; install scipy in the abacuskit plotting environment")
+    if npoints < 2:
+        die("--points must be at least 2")
+    t = np.linspace(0.0, 1.0, npoints)
+    points = start[:, None] + (end - start)[:, None] * t[None, :]
+    frac = np.linalg.inv(axes.T) @ (points - origin[:, None])
+    for i in range(3):
+        frac[i] = np.mod(frac[i], int(shape[i]))
+    sampled = map_coordinates(values, frac, order=1, mode="nearest")
+    distance = np.linalg.norm(end - start) * t * BOHR_TO_ANGSTROM
+    return distance, sampled
+
+
+def gaussian_smooth_energy(matrix: np.ndarray, energy_step: float, sigma: float) -> np.ndarray:
+    if sigma <= 0.0:
+        return matrix
+    radius = max(1, int(math.ceil(4.0 * sigma / energy_step)))
+    x = np.arange(-radius, radius + 1, dtype=float) * energy_step
+    kernel = np.exp(-0.5 * (x / sigma) ** 2)
+    kernel /= kernel.sum()
+    padded = np.pad(matrix, ((radius, radius), (0, 0)), mode="edge")
+    return np.apply_along_axis(lambda col: np.convolve(col, kernel, mode="valid"), 0, padded)
+
+
+def reconstruct_line_ldos_from_cumulative(
+    bias_to_line: dict[float, np.ndarray],
+    emin: float,
+    emax: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    if not bias_to_line:
+        die("no LDOS bias samples available")
+    zero = np.zeros_like(next(iter(bias_to_line.values())))
+    if 0.0 not in bias_to_line:
+        bias_to_line[0.0] = zero
+    energies: list[float] = []
+    rows: list[np.ndarray] = []
+    neg = sorted(b for b in bias_to_line if b <= 0.0)
+    for left, right in zip(neg[:-1], neg[1:]):
+        delta = right - left
+        if delta <= 0.0:
+            continue
+        center = 0.5 * (left + right)
+        if emin <= center <= emax:
+            energies.append(center)
+            rows.append(np.maximum((bias_to_line[left] - bias_to_line[right]) / delta, 0.0))
+    pos = sorted(b for b in bias_to_line if b >= 0.0)
+    for left, right in zip(pos[:-1], pos[1:]):
+        delta = right - left
+        if delta <= 0.0:
+            continue
+        center = 0.5 * (left + right)
+        if emin <= center <= emax:
+            energies.append(center)
+            rows.append(np.maximum((bias_to_line[right] - bias_to_line[left]) / delta, 0.0))
+    if not rows:
+        die("LDOS cubes do not cover the requested energy range")
+    order = np.argsort(np.array(energies))
+    return np.array(energies, dtype=float)[order], np.vstack(rows)[order]
+
+
+def cmd_ldos_line(args) -> None:
+    os.environ.setdefault("MPLCONFIGDIR", "/tmp/abacuskit-matplotlib")
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    root = args.path.expanduser()
+    cubes = find_ldos_cube_files(root)
+    if not cubes:
+        die(f"cannot find LDOS_*eV.cube files under {resolve_out_path(root)}")
+    needed_min = float(args.emin) - float(args.energy_step)
+    needed_max = float(args.emax) + float(args.energy_step)
+    cubes = [cube for cube in cubes if (bias := parse_ldos_bias(cube)) is not None and needed_min <= bias <= needed_max]
+    if len(cubes) < 2:
+        die("at least two LDOS bias cube files are required for line LDOS reconstruction")
+    _, atoms, origin, axes, shape, first_values = read_cube_grid_with_atoms_unclipped(cubes[0], values=True)
+    atom_a = parse_elf_atom_selector(args.atom, atoms)
+    atom_b = parse_elf_atom_selector(args.neighbor, atoms)
+    start = np.asarray(atom_a["pos"], dtype=float)
+    end = np.asarray(atom_b["pos"], dtype=float)
+    distance, first_line = sample_cube_on_line(first_values, origin, axes, shape, start, end, args.points)
+    bias_to_line: dict[float, np.ndarray] = {float(parse_ldos_bias(cubes[0])): first_line}
+    for cube in cubes[1:]:
+        bias = parse_ldos_bias(cube)
+        if bias is None:
+            continue
+        _, _, origin_i, axes_i, shape_i, values_i = read_cube_grid_with_atoms_unclipped(cube, values=True)
+        if not np.allclose(origin_i, origin) or not np.allclose(axes_i, axes) or not np.array_equal(shape_i, shape):
+            die(f"LDOS cube grid differs from first cube: {cube}")
+        _, line = sample_cube_on_line(values_i, origin, axes, shape, start, end, args.points)
+        bias_to_line[float(bias)] = line
+    energies, ldos = reconstruct_line_ldos_from_cumulative(bias_to_line, args.emin, args.emax)
+    if args.sigma > 0.0:
+        ldos = gaussian_smooth_energy(ldos, args.energy_step, args.sigma)
+
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(7.2, 4.8), dpi=args.dpi)
+    cmap = resolve_ldos_cmap(args.cmap)
+    vmin = getattr(args, "vmin", None)
+    vmax = getattr(args, "vmax", None)
+    if vmin is not None and vmax is not None and float(vmin) >= float(vmax):
+        die("--vmin must be smaller than --vmax")
+    color_ticks = None
+    if vmin is not None or vmax is not None:
+        finite = ldos[np.isfinite(ldos)]
+        if finite.size == 0:
+            die("line LDOS contains no finite values")
+        color_min = float(vmin) if vmin is not None else float(finite.min())
+        color_max = float(vmax) if vmax is not None else float(finite.max())
+        plot_ldos = np.clip(ldos, color_min, color_max)
+        contour_levels = np.linspace(color_min, color_max, int(args.levels))
+        mesh = ax.contourf(energies, distance, plot_ldos.T, levels=contour_levels, cmap=cmap, vmin=color_min, vmax=color_max)
+        color_ticks = np.linspace(color_min, color_max, 8 if args.cmap == LDOS1_REFERENCE_CMAP else 6)
+    else:
+        mesh = ax.contourf(energies, distance, ldos.T, levels=args.levels, cmap=cmap)
+    fig.colorbar(mesh, ax=ax, label="LDOS (arb. units)", ticks=color_ticks)
+    ax.set_xlabel("Energy - $E_F$ (eV)")
+    ax.set_ylabel(f"Distance from {args.atom} to {args.neighbor} (Angstrom)")
+    ax.set_title(f"Line LDOS: {args.atom} -> {args.neighbor}")
+    fig.tight_layout()
+    fig.savefig(args.out)
+    plt.close(fig)
+
+    csv_path = args.out.with_suffix(".csv")
+    with csv_path.open("w") as handle:
+        handle.write("distance_A," + ",".join(f"E_{energy:.8f}" for energy in energies) + "\n")
+        for idx, dist in enumerate(distance):
+            handle.write(f"{dist:.10f}," + ",".join(f"{value:.10e}" for value in ldos[:, idx]) + "\n")
+    print(
+        f"wrote line LDOS plot {args.out}; CSV {csv_path}; "
+        f"energy range {energies[0]:.4g} to {energies[-1]:.4g} eV; "
+        f"{len(energies)} energy bins, {len(distance)} path points"
+    )
+
+
 def cmd_plot_band(args) -> None:
     os.environ.setdefault("MPLCONFIGDIR", "/tmp/abacuskit-matplotlib")
     import matplotlib
@@ -3131,11 +3488,16 @@ def cmd_plot_dos(args) -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    root = resolve_out_path(args.path)
+    input_root = args.path.expanduser()
+    root = resolve_out_path(input_root)
+    plot_fermi = args.fermi
+    fermi_log = None
+    if plot_fermi is None:
+        plot_fermi, fermi_log = find_fermi_energy(input_root)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     kind = args.kind
     if kind == "auto":
-        if find_first_file(root, ["PDOS"], ["PDOS*"]) and args.select:
+        if find_first_file(root, ["PDOS", "PDOS.dat"], ["PDOS*"]) and args.select:
             kind = "pdos"
         elif find_first_file(root, ["TDOS.dat", "DOS1_smearing.dat", "DOS1"], ["TDOS*.dat", "DOS*_smearing.dat", "DOS*"]):
             kind = "dos"
@@ -3149,9 +3511,14 @@ def cmd_plot_dos(args) -> None:
         if not dos_file:
             die(f"cannot find DOS file under {root}")
         data = read_numeric_table(dos_file)
-        x, xlabel = maybe_shift_fermi(data[:, 0], args.fermi)
+        x, xlabel = maybe_shift_fermi(data[:, 0], plot_fermi)
         fig, ax = plt.subplots(figsize=(6.0, 4.0), dpi=180)
-        ax.plot(x, data[:, 1], lw=1.5, label=dos_file.name)
+        for col in range(1, data.shape[1]):
+            label = dos_file.name if data.shape[1] == 2 else f"{dos_file.name}: col{col + 1}"
+            ax.plot(x, data[:, col], lw=1.5, label=label)
+        if plot_fermi is not None:
+            ax.axvline(0.0, lw=0.8, ls="--", color="0.25")
+        ax.set_xlim(DOS_PLOT_EMIN, DOS_PLOT_EMAX)
         ax.set_xlabel(xlabel)
         ax.set_ylabel("DOS")
         ax.legend(frameon=False)
@@ -3159,23 +3526,35 @@ def cmd_plot_dos(args) -> None:
         fig.tight_layout()
         fig.savefig(args.out)
         plt.close(fig)
-        print(f"wrote DOS plot {args.out}")
+        source = f" from {fermi_log}" if fermi_log else ""
+        fermi_note = f"; E_F = {plot_fermi:.9f} eV{source}" if plot_fermi is not None else ""
+        print(f"wrote DOS plot {args.out}{fermi_note}; x range {DOS_PLOT_EMIN:g} to {DOS_PLOT_EMAX:g} eV")
         return
 
     if kind == "pdos":
-        pdos_file = args.file or find_first_file(root, ["PDOS"], ["PDOS*"])
+        pdos_file = args.file or find_first_file(root, ["PDOS", "PDOS.dat"], ["PDOS*"])
         if not pdos_file:
             die(f"cannot find PDOS file under {root}")
         energies, groups = parse_pdos_file(pdos_file)
         selectors = parse_selectors(args.select)
         if selectors:
             groups = {key: val for key, val in groups.items() if key in selectors}
+        else:
+            default_groups = {key: groups[key] for key in DEFAULT_PDOS_SELECTORS if key in groups}
+            if default_groups:
+                groups = default_groups
         if not groups:
             die("selected PDOS channels are not present in the PDOS file")
-        x, xlabel = maybe_shift_fermi(energies, args.fermi)
+        x, xlabel = maybe_shift_fermi(energies, plot_fermi)
         fig, ax = plt.subplots(figsize=(6.4, 4.2), dpi=180)
         for (species, orbital), values in sorted(groups.items()):
-            ax.plot(x, values, lw=1.2, color=ORBITAL_COLORS.get(orbital), label=f"{species}-{orbital}")
+            color = PDOS_CHANNEL_COLORS.get((species, orbital), ORBITAL_COLORS.get(orbital))
+            label = f"{species}-{orbital}"
+            ax.plot(x, values, lw=1.4, color=color, label=label)
+            ax.fill_between(x, values, 0.0, color=color, alpha=0.22, linewidth=0)
+        if plot_fermi is not None:
+            ax.axvline(0.0, lw=0.8, ls="--", color="0.25")
+        ax.set_xlim(DOS_PLOT_EMIN, DOS_PLOT_EMAX)
         ax.set_xlabel(xlabel)
         ax.set_ylabel("PDOS")
         ax.legend(frameon=False, ncol=2)
@@ -3183,32 +3562,26 @@ def cmd_plot_dos(args) -> None:
         fig.tight_layout()
         fig.savefig(args.out)
         plt.close(fig)
-        print(f"wrote PDOS plot {args.out}")
+        source = f" from {fermi_log}" if fermi_log else ""
+        fermi_note = f"; E_F = {plot_fermi:.9f} eV{source}" if plot_fermi is not None else ""
+        print(f"wrote PDOS plot {args.out}{fermi_note}; x range {DOS_PLOT_EMIN:g} to {DOS_PLOT_EMAX:g} eV")
         return
 
     if kind == "ldos":
-        ldos_file = args.file or find_first_file(root, ["LDOS.txt"], ["LDOS*.txt", "LDOS_*eV.cube"])
+        ldos_file = args.file or find_first_file(root, ["LDOS.txt"], ["LDOS*.txt"])
+        ldos_cubes = find_ldos_cube_files(input_root)
+        if not ldos_file and ldos_cubes:
+            ldos_file = ldos_cubes[0]
         if not ldos_file:
             die(f"cannot find LDOS.txt or LDOS cube file under {root}")
-        fig, ax = plt.subplots(figsize=(6.4, 4.2), dpi=180)
         if ldos_file.suffix.lower() == ".cube":
-            values = read_cube_values(ldos_file)
-            plane = values[:, :, values.shape[2] // 2]
-            im = ax.imshow(plane.T, origin="lower", aspect="auto", cmap="viridis")
-            fig.colorbar(im, ax=ax, label="LDOS")
-            ax.set_xlabel("grid x")
-            ax.set_ylabel("grid y")
-            ax.set_title(ldos_file.name)
+            outputs = plot_ldos_cube(ldos_file, args.out, ldos_cubes)
         else:
             data = read_numeric_table(ldos_file)
-            im = ax.imshow(data, origin="lower", aspect="auto", cmap="viridis")
-            fig.colorbar(im, ax=ax, label="LDOS")
-            ax.set_xlabel("energy grid")
-            ax.set_ylabel("line point")
-        fig.tight_layout()
-        fig.savefig(args.out)
-        plt.close(fig)
-        print(f"wrote LDOS plot {args.out}")
+            energy, xlabel, source = ldos_energy_axis(input_root, data.shape[1], plot_fermi)
+            outputs = plot_ldos_matrix(data, energy, xlabel, args.out, ldos_file.name)
+            print(f"note: {source}")
+        print("wrote LDOS plots " + ", ".join(str(path) for path in outputs))
         return
 
     die(f"unknown plot kind: {kind}")
@@ -3296,6 +3669,17 @@ ELF_REFERENCE_COLORS = [
     (0.9, "#ff6600"),
     (1.0, "#ff0000"),
 ]
+LDOS1_REFERENCE_CMAP = "ldos1"
+LDOS1_REFERENCE_COLORS = [
+    (0.0, "#000000"),
+    (0.15, "#1b0040"),
+    (0.30, "#5400a8"),
+    (0.45, "#cf2bd9"),
+    (0.60, "#e65a00"),
+    (0.75, "#f48f00"),
+    (0.88, "#ffd400"),
+    (1.0, "#ffff2a"),
+]
 ELEMENT_PLOT_COLORS = {
     "H": "#f7f7f7",
     "C": "#444444",
@@ -3319,6 +3703,14 @@ def resolve_elf_cmap(cmap: str):
     from matplotlib.colors import LinearSegmentedColormap
 
     return LinearSegmentedColormap.from_list(ELF_REFERENCE_CMAP, ELF_REFERENCE_COLORS)
+
+
+def resolve_ldos_cmap(cmap: str):
+    if cmap != LDOS1_REFERENCE_CMAP:
+        return cmap
+    from matplotlib.colors import LinearSegmentedColormap
+
+    return LinearSegmentedColormap.from_list(LDOS1_REFERENCE_CMAP, LDOS1_REFERENCE_COLORS)
 
 
 def elf_range_levels(vmax: float, vmin: float = 0.0) -> list[float]:
@@ -4179,6 +4571,7 @@ def cmd_plot_mlip_eval(args) -> None:
         quantity=args.quantity,
         natoms=args.natoms,
         data_dir=args.data_dir,
+        input_file=getattr(args, "input", None),
         title=args.title,
         dpi=args.dpi,
         fmt=args.format,
@@ -4193,6 +4586,159 @@ def cmd_plot_mlip_eval(args) -> None:
         print(f"wrote plot {figure}")
     print(f"wrote summary {result['summary_csv']}")
     print(f"wrote outliers {result['outliers_csv']}")
+
+
+def deepmd_frame_count(system: Path) -> int:
+    total = 0
+    for set_dir in sorted(system.expanduser().glob("set.*")):
+        if not set_dir.is_dir():
+            continue
+        for name in ("energy.npy", "coord.npy", "force.npy", "box.npy"):
+            path = set_dir / name
+            if path.is_file():
+                total += int(np.load(path, mmap_mode="r").shape[0])
+                break
+    return total
+
+
+def read_deepmd_training_systems(input_json: Path) -> tuple[list[Path], list[Path]]:
+    if not input_json.is_file():
+        die(f"input JSON not found: {input_json}")
+    data = json.loads(input_json.read_text())
+    training = data.get("training") if isinstance(data, dict) else None
+    if not isinstance(training, dict):
+        die(f"cannot find training section in {input_json}")
+
+    def systems_from(section_name: str) -> list[Path]:
+        section = training.get(section_name) or {}
+        systems = section.get("systems") if isinstance(section, dict) else None
+        if systems is None:
+            return []
+        if isinstance(systems, str):
+            systems = [systems]
+        return [Path(item).expanduser() for item in systems]
+
+    return systems_from("training_data"), systems_from("validation_data")
+
+
+def resolve_dp_executable(dp: Path | str) -> str:
+    dp_path = Path(dp).expanduser()
+    if dp_path.is_absolute() and dp_path.is_file():
+        return str(dp_path)
+    from_python = Path(sys.executable).resolve().parent / str(dp)
+    if from_python.is_file():
+        return str(from_python)
+    found = shutil.which(str(dp))
+    if found:
+        return found
+    return str(dp)
+
+
+def freeze_mlip_model(root: Path, dp: Path | str, output_stem: str, refreeze: bool) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    model = root / f"{output_stem}.pt2"
+    if model.is_file() and not refreeze:
+        print(f"using existing model {model}")
+        return model
+    cmd = [str(dp), "--pt", "freeze", "-o", output_stem]
+    log_path = root / "freeze_detail.log"
+    print(f"running freeze: {' '.join(cmd)}")
+    with log_path.open("w") as log:
+        result = subprocess.run(cmd, cwd=root, stdout=log, stderr=subprocess.STDOUT)
+    if result.returncode != 0 or not model.is_file():
+        tail = "\n".join(log_path.read_text(errors="ignore").splitlines()[-40:])
+        die(f"freeze failed; see {log_path}\n{tail}")
+    print(f"wrote {model}")
+    return model
+
+
+def append_detail_outputs(root: Path, tmp_base: str, final_prefix: str, overwrite: bool) -> None:
+    for name in ("e", "e_peratom", "f", "v", "v_peratom"):
+        src = root / f"{tmp_base}.{name}.out"
+        if not src.is_file():
+            continue
+        dst = root / f"detail.{final_prefix}.{name}.out"
+        if dst.exists() and not overwrite:
+            die(f"detail output exists: {dst}; pass --overwrite to replace")
+        mode = "a" if dst.exists() else "w"
+        with dst.open(mode) as out, src.open() as inp:
+            out.write(inp.read())
+        src.unlink()
+
+
+def remove_existing_detail(root: Path, prefix: str) -> None:
+    for path in root.glob(f"detail.{prefix}.*.out"):
+        path.unlink()
+
+
+def run_mlip_detail_for_systems(
+    root: Path,
+    dp: Path | str,
+    model: Path,
+    prefix: str,
+    systems: list[Path],
+    overwrite: bool,
+) -> int:
+    if not systems:
+        print(f"skip {prefix}: no systems")
+        return 0
+    existing = sorted(root.glob(f"detail.{prefix}.*.out"))
+    if existing and not overwrite:
+        names = ", ".join(path.name for path in existing)
+        die(f"detail outputs already exist for {prefix}: {names}; pass --overwrite to replace")
+    if overwrite:
+        remove_existing_detail(root, prefix)
+    total_frames = 0
+    for idx, system in enumerate(systems):
+        nframes = deepmd_frame_count(system)
+        if nframes <= 0:
+            die(f"no DeepMD frames found in {system}")
+        total_frames += nframes
+        tmp_base = f"abacuskit_{prefix}_{idx:03d}_detail"
+        for old in root.glob(f"{tmp_base}.*.out"):
+            old.unlink()
+        cmd = [
+            str(dp),
+            "--pt-expt",
+            "test",
+            "-m",
+            str(model),
+            "-s",
+            str(system),
+            "-n",
+            str(nframes),
+            "-d",
+            tmp_base,
+        ]
+        log_path = root / f"test_{prefix}_{idx:03d}.log"
+        print(f"running {prefix} detail for {system} ({nframes} frames)")
+        with log_path.open("w") as log:
+            result = subprocess.run(cmd, cwd=root, stdout=log, stderr=subprocess.STDOUT)
+        if result.returncode != 0:
+            tail = "\n".join(log_path.read_text(errors="ignore").splitlines()[-40:])
+            die(f"dp test failed for {system}; see {log_path}\n{tail}")
+        append_detail_outputs(root, tmp_base, prefix, overwrite=True)
+    print(f"wrote detail.{prefix}.*.out from {total_frames} frames")
+    return total_frames
+
+
+def cmd_make_mlip_detail(args) -> None:
+    root = args.root.expanduser()
+    dp = resolve_dp_executable(args.dp)
+    input_json = args.input if args.input else root / "input.json"
+    train_systems, valid_systems = read_deepmd_training_systems(input_json)
+    model = args.model.expanduser() if args.model else freeze_mlip_model(root, dp, args.model_stem, args.refreeze)
+    if not model.is_absolute():
+        model = root / model
+    if not model.is_file():
+        die(f"model not found: {model}")
+
+    prefixes = set(args.dataset)
+    if "valid" in prefixes:
+        run_mlip_detail_for_systems(root, dp, model, "valid", valid_systems, args.overwrite)
+    if "train" in prefixes:
+        run_mlip_detail_for_systems(root, dp, model, "train", train_systems, args.overwrite)
+    print("detail generation finished; run menu 25 -> 1 for both datasets, or 25 -> 5 to choose valid/train")
 
 
 def _abacus_dpdata_format(job: Path, explicit_fmt: str | None = None) -> str:
@@ -5222,18 +5768,15 @@ def interactive_collect_report() -> None:
 
 def interactive_plot_dos() -> None:
     print("\n[11] Plot DOS / PDOS / LDOS\n")
+    kind = prompt_choice("Plot kind", ["dos", "pdos", "ldos"], "dos")
     args = argparse.Namespace(
         path=prompt_path("ABACUS job or OUT.* directory"),
-        kind=prompt_choice("Plot kind", ["auto", "dos", "pdos", "ldos"], "auto"),
+        kind=kind,
         file=None,
-        select=prompt_multi("PDOS selectors, e.g. C=p H=s Ni=d, empty for none") or None,
+        select=None,
         fermi=None,
-        out=prompt_path("Output image", "dos.png"),
+        out=Path(f"{kind}.png"),
     )
-    fermi_text = prompt_text("Fermi energy shift in eV, empty for none", "")
-    args.fermi = float(fermi_text) if fermi_text else None
-    file_text = prompt_text("Explicit data file, empty for auto", "")
-    args.file = Path(file_text).expanduser() if file_text else None
     cmd_plot_dos(args)
     print("DOS/PDOS/LDOS plot finished. Exiting abacuskit.")
     raise ProgramExit
@@ -5614,35 +6157,105 @@ def interactive_plot_mlip_eval() -> None:
     print("\n[25] Plot MLIP/DeepMD evaluation parity\n")
     print(
         """
-  1) Overview: energy + force + stress/virial when available
+  1) Overview: valid + train energy/force/stress when available
   2) Energy only
   3) Force only
   4) Stress/virial only
-  5) Custom options
+  5) Dataset switch: valid or train overview
+  6) Train + valid relative energy and force
+  7) Freeze model and generate train/valid detail files
   0) Back to previous menu
 """
     )
-    choice = prompt_choice("MLIP evaluation plot", ["1", "2", "3", "4", "5", "0"], "1")
+    choice = prompt_choice("MLIP evaluation plot", ["1", "2", "3", "4", "5", "6", "7", "0"], "1")
     if choice == "0":
         return
-    quantity = {"1": "all", "2": "energy", "3": "force", "4": "stress"}.get(choice, "all")
-    if choice == "5":
-        quantity = prompt_choice("Quantity", ["all", "energy", "force", "stress", "virial"], "all")
-        natoms_text = prompt_text("Atom count for total-energy conversion, empty for auto", "")
-        data_dir_text = prompt_text("DeepMD data directory for type.raw/box.npy, empty for auto", "")
+    if choice == "7":
+        mode = prompt_choice("Detail datasets", ["both", "valid", "train"], "both")
+        dataset = ["train", "valid"] if mode == "both" else [mode]
         args = argparse.Namespace(
-            root=prompt_path("Training/test directory containing detail.*.out", "."),
-            out=prompt_path("Output directory", "mlip_eval_plots"),
-            prefix=prompt_text("Detail file prefix", "valid"),
-            quantity=quantity,
-            natoms=int(natoms_text) if natoms_text.strip() else None,
-            data_dir=Path(data_dir_text).expanduser() if data_dir_text.strip() else None,
-            title=prompt_text("Overview title, empty for none", "") or None,
-            dpi=prompt_int("Figure DPI", 300),
-            format=prompt_choice("Figure format", ["png", "pdf", "svg"], "png"),
-            outlier_sigma=prompt_float("Outlier sigma threshold", 4.0),
-            top_outliers=prompt_int("Top outliers per quantity", 20),
+            root=Path("."),
+            input=None,
+            model=None,
+            model_stem="frozen_model",
+            dp=DEFAULT_DP,
+            dataset=dataset,
+            overwrite=True,
+            refreeze=False,
         )
+        print("Using defaults: root=., input=input.json, model=frozen_model.pt2, overwrite existing detail files")
+        cmd_make_mlip_detail(args)
+        return
+    if choice == "1":
+        plotted = 0
+        for prefix, outdir in [("valid", Path("mlip_eval_plots")), ("train", Path("mlip_eval_train_plots"))]:
+            if not list(Path(".").glob(f"detail.{prefix}.*.out")):
+                print(f"skip {prefix}: no detail.{prefix}.*.out files in current directory")
+                continue
+            args = argparse.Namespace(
+                root=Path("."),
+                out=outdir,
+                prefix=prefix,
+                quantity="all",
+                natoms=None,
+                data_dir=None,
+                title=None,
+                dpi=300,
+                format="png",
+                outlier_sigma=4.0,
+                top_outliers=20,
+            )
+            print(f"Using defaults: root=., prefix={prefix}, out={outdir}, format=png, dpi=300")
+            cmd_plot_mlip_eval(args)
+            plotted += 1
+        if plotted == 0:
+            die("no detail.valid.*.out or detail.train.*.out files found; use menu 25 -> 7 to generate detail files first")
+        return
+    quantity = {"1": "all", "2": "energy", "3": "force", "4": "stress", "6": "relative-energy"}.get(choice, "all")
+    if choice == "5":
+        prefix = prompt_choice("Detail dataset", ["valid", "train"], "valid")
+        outdir = Path("mlip_eval_plots") if prefix == "valid" else Path("mlip_eval_train_plots")
+        args = argparse.Namespace(
+            root=Path("."),
+            out=outdir,
+            prefix=prefix,
+            quantity="all",
+            natoms=None,
+            data_dir=None,
+            input=None,
+            title=None,
+            dpi=300,
+            format="png",
+            outlier_sigma=4.0,
+            top_outliers=20,
+        )
+        print(f"Using defaults: root=., prefix={prefix}, out={outdir}, format=png, dpi=300")
+    elif choice == "6":
+        plotted = 0
+        for prefix, outdir in [("valid", Path("mlip_eval_relative_plots")), ("train", Path("mlip_eval_train_relative_plots"))]:
+            if not list(Path(".").glob(f"detail.{prefix}.*.out")):
+                print(f"skip {prefix}: no detail.{prefix}.*.out files in current directory")
+                continue
+            args = argparse.Namespace(
+                root=Path("."),
+                out=outdir,
+                prefix=prefix,
+                quantity="relative-energy-force",
+                natoms=None,
+                data_dir=None,
+                input=None,
+                title=None,
+                dpi=300,
+                format="png",
+                outlier_sigma=4.0,
+                top_outliers=20,
+            )
+            print(f"Using defaults: root=., prefix={prefix}, out={outdir}, quantity=relative-energy-force, input=input.json, format=png, dpi=300")
+            cmd_plot_mlip_eval(args)
+            plotted += 1
+        if plotted == 0:
+            die("no detail.valid.*.out or detail.train.*.out files found; use menu 25 -> 7 to generate detail files first")
+        return
     else:
         args = argparse.Namespace(
             root=Path("."),
@@ -5651,13 +6264,14 @@ def interactive_plot_mlip_eval() -> None:
             quantity=quantity,
             natoms=None,
             data_dir=None,
+            input=None,
             title=None,
             dpi=300,
             format="png",
             outlier_sigma=4.0,
             top_outliers=20,
         )
-        print("Using defaults: root=., prefix=valid, out=mlip_eval_plots, format=png, dpi=300")
+        print("Using defaults: root=., prefix=valid, out=mlip_eval_plots, input=input.json, format=png, dpi=300")
     cmd_plot_mlip_eval(args)
 
 
@@ -6267,6 +6881,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", type=Path, required=True)
     p.set_defaults(func=cmd_plot_dos)
 
+    p = sub.add_parser("ldos-line", help="reconstruct and plot line LDOS from ABACUS LCAO LDOS_*eV.cube files")
+    p.add_argument("path", type=Path, help="ABACUS job directory or OUT.* directory containing LDOS_*eV.cube files")
+    p.add_argument("--atom", required=True, help="start atom selector, e.g. N:69")
+    p.add_argument("--neighbor", required=True, help="end atom selector, e.g. Ru:74")
+    p.add_argument("--emin", type=float, default=-2.0, help="minimum Energy - EF in eV")
+    p.add_argument("--emax", type=float, default=2.0, help="maximum Energy - EF in eV")
+    p.add_argument("--energy-step", type=float, default=0.05, help="energy spacing of LDOS bias cubes in eV")
+    p.add_argument("--sigma", type=float, default=0.08, help="Gaussian broadening in eV")
+    p.add_argument("--points", type=int, default=150, help="number of points along the atom-atom path")
+    p.add_argument("--levels", type=int, default=90, help="filled-contour level count")
+    p.add_argument("--cmap", default="turbo", help="matplotlib colormap; use ldos1 for the LDOS1.png-like color scale")
+    p.add_argument("--vmin", type=float, help="minimum plotted LDOS value for color scale")
+    p.add_argument("--vmax", type=float, help="maximum plotted LDOS value for color scale")
+    p.add_argument("--dpi", type=int, default=220)
+    p.add_argument("--out", type=Path, required=True)
+    p.set_defaults(func=cmd_ldos_line)
+
     p = sub.add_parser("plot-band", help="plot ABACUS BANDS_*.dat and shift Fermi level to 0 eV")
     p.add_argument("path", type=Path, help="ABACUS job directory, OUT.* directory, or BANDS_*.dat file")
     p.add_argument("--file", type=Path, help="explicit BANDS_*.dat file")
@@ -6415,15 +7046,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("root", type=Path, nargs="?", default=Path("."), help="directory containing detail.<prefix>.*.out files")
     p.add_argument("--prefix", default="valid", help="DeepMD detail file prefix, e.g. valid or train")
     p.add_argument("--out", type=Path, default=Path("mlip_eval_plots"), help="output plot/report directory")
-    p.add_argument("--quantity", choices=["all", "energy", "force", "stress", "virial"], default="all")
+    p.add_argument("--quantity", choices=["all", "energy", "relative-energy", "relative-energy-force", "force", "stress", "virial"], default="all")
     p.add_argument("--natoms", type=int, help="atom count for converting total energy to eV/atom when e_peratom is absent")
     p.add_argument("--data-dir", type=Path, help="DeepMD data directory used to infer type.raw and box.npy")
+    p.add_argument("--input", type=Path, help="DeepMD input.json used for relative-energy system boundaries")
     p.add_argument("--title", help="overview figure title")
     p.add_argument("--dpi", type=int, default=300)
     p.add_argument("--format", choices=["png", "pdf", "svg"], default="png")
     p.add_argument("--outlier-sigma", type=float, default=4.0, help="mark outliers beyond this residual sigma")
     p.add_argument("--top-outliers", type=int, default=20, help="top residual rows exported per quantity")
     p.set_defaults(func=cmd_plot_mlip_eval)
+
+    p = sub.add_parser("make-mlip-detail", help="freeze a DeepMD model and generate detail.train/valid.*.out for MLIP plots")
+    p.add_argument("root", type=Path, nargs="?", default=Path("."), help="DeepMD training directory; default current directory")
+    p.add_argument("--input", type=Path, help="DeepMD input.json; default is <root>/input.json")
+    p.add_argument("--model", type=Path, help="existing frozen model, e.g. frozen_model.pt2; default creates/uses <root>/frozen_model.pt2")
+    p.add_argument("--model-stem", default="frozen_model", help="freeze output stem; default frozen_model")
+    p.add_argument("--dp", type=Path, default=DEFAULT_DP, help="dp executable")
+    p.add_argument("--dataset", nargs="+", choices=["train", "valid"], default=["train", "valid"], help="datasets to test")
+    p.add_argument("--overwrite", action="store_true", help="replace existing detail.<dataset>.*.out files")
+    p.add_argument("--refreeze", action="store_true", help="run dp freeze even if the frozen model already exists")
+    p.set_defaults(func=cmd_make_mlip_detail)
 
     p = sub.add_parser("screen-raw-data", help="screen untrained ABACUS single-point/AIMD data and write filtered DeepMD data")
     p.add_argument("paths", type=Path, nargs="*", default=[Path(".")], help="ABACUS job directories or roots; default current directory")
