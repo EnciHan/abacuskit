@@ -380,6 +380,13 @@ def _metrics(quantity: QuantityData) -> dict[str, float | int | str]:
     }
 
 
+def _format_r2_for_plot(value: float) -> str:
+    if not np.isfinite(value):
+        return "n/a"
+    shown = min(float(value), 0.9999)
+    return f"{shown:.4f}"
+
+
 def _axis_limits(ref: np.ndarray, pred: np.ndarray) -> tuple[float, float]:
     finite = np.concatenate([ref[np.isfinite(ref)], pred[np.isfinite(pred)]])
     if finite.size == 0:
@@ -407,12 +414,13 @@ def _hist_range(values: np.ndarray) -> tuple[float, float]:
 
 
 def _panel(fig, spec, quantity: QuantityData, color: str, letter: str | None = None) -> None:
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
     from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
-    sub = spec.subgridspec(2, 2, height_ratios=(0.23, 1.0), width_ratios=(1.0, 0.23), hspace=0.03, wspace=0.03)
-    ax_top = fig.add_subplot(sub[0, 0])
-    ax = fig.add_subplot(sub[1, 0], sharex=ax_top)
-    ax_right = fig.add_subplot(sub[1, 1], sharey=ax)
+    ax = fig.add_subplot(spec)
+    divider = make_axes_locatable(ax)
+    ax_top = divider.append_axes("top", size="23%", pad=0.0, sharex=ax)
+    ax_right = divider.append_axes("right", size="23%", pad=0.0, sharey=ax)
 
     ref = quantity.ref
     pred = quantity.pred
@@ -427,7 +435,6 @@ def _panel(fig, spec, quantity: QuantityData, color: str, letter: str | None = N
     ax.set_xlabel(f"{quantity.ref_label} ({quantity.axis_unit})")
     ax.set_ylabel(f"{quantity.pred_label} ({quantity.axis_unit})")
     ax.tick_params(direction="in")
-    ax.grid(True, color="0.88", lw=0.5)
 
     metrics = _metrics(quantity)
     ax.text(
@@ -435,7 +442,7 @@ def _panel(fig, spec, quantity: QuantityData, color: str, letter: str | None = N
         0.95,
         "\n".join(
             [
-                f"$R^2$ = {metrics['r2']:.4f}" if np.isfinite(metrics["r2"]) else "$R^2$ = n/a",
+                f"$R^2$ = {_format_r2_for_plot(float(metrics['r2']))}",
                 f"MAE = {metrics['mae']:.2f} {quantity.metric_unit}",
                 f"RMSE = {metrics['rmse']:.2f} {quantity.metric_unit}",
                 f"N = {metrics['points']}",
@@ -467,6 +474,7 @@ def _panel(fig, spec, quantity: QuantityData, color: str, letter: str | None = N
     )
     inset.axvline(0.0, color="black", lw=0.9, ls="--")
     inset.set_title("Residual", fontsize=8, pad=1)
+    inset.set_yticks([])
     inset.tick_params(labelsize=7, direction="in")
     for spine in inset.spines.values():
         spine.set_linewidth(0.8)
