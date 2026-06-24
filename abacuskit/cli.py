@@ -34,12 +34,14 @@ try:
     from . import __affiliation__, __author__, __version__
     from .bader import run_bader_analysis, write_bader_csv, write_bader_json
     from .cohp import build_orbital_map, format_orbital_map, resolve_orbital_arguments, run_cohp
+    from .plot_style import EFERMI_RELATIVE_LABEL, add_square_map_axes, get_figsize, save_journal_figure, set_journal_style, style_colorbar, style_grid, style_legend, style_map_axes
 except ImportError:
     __version__ = "v1.2.5"
     __author__ = "Han Enci, Zhong Lisheng, Yu Yutong, Xu Mengting, Chen Jingyuan"
     __affiliation__ = "Xi'an University of Technology"
     from bader import run_bader_analysis, write_bader_csv, write_bader_json
     from cohp import build_orbital_map, format_orbital_map, resolve_orbital_arguments, run_cohp
+    from plot_style import EFERMI_RELATIVE_LABEL, add_square_map_axes, get_figsize, save_journal_figure, set_journal_style, style_colorbar, style_grid, style_legend, style_map_axes
 
 BOHR_PER_ANGSTROM = 1.88972612546
 USER_CONFIG_PATH = Path.home() / ".abacuskit" / "config.json"
@@ -1342,11 +1344,19 @@ touch DONE
 def parse_key_values(items: list[str] | None) -> dict[str, str]:
     result: dict[str, str] = {}
     for item in items or []:
-        if "=" not in item:
-            die(f"bad key=value item: {item}")
-        k, v = item.split("=", 1)
-        result[k.strip()] = v.strip()
+        k, v = parse_key_value(item)
+        result[k] = v
     return result
+
+
+def parse_key_value(item: str) -> tuple[str, str]:
+    if "=" not in item:
+        die(f"bad key=value item: {item}")
+    k, v = item.split("=", 1)
+    key = k.strip()
+    if not key:
+        die(f"bad key=value item: {item}")
+    return key, v.strip()
 
 
 def params_have_key(params: list[tuple[str, object]], key: str) -> bool:
@@ -2362,7 +2372,7 @@ def parse_selectors(items: list[str] | None) -> set[tuple[str, str]]:
 def maybe_shift_fermi(x: np.ndarray, fermi: float | None) -> tuple[np.ndarray, str]:
     if fermi is None:
         return x, "Energy (eV)"
-    return x - fermi, "Energy - E_F (eV)"
+    return x - fermi, EFERMI_RELATIVE_LABEL
 
 
 def parse_fermi_energy(text: str) -> float | None:
@@ -2935,7 +2945,7 @@ def plot_band_axes(
         ax.set_xticklabels(labels)
     ax.set_xlim(float(x[0]), float(x[-1]))
     ax.set_xlabel("K-path")
-    ax.set_ylabel(r"Energy - $E_F$ (eV)")
+    ax.set_ylabel(EFERMI_RELATIVE_LABEL)
     ax.grid(False)
 
 
@@ -3079,27 +3089,31 @@ def plot_ldos_matrix(
 ) -> list[Path]:
     import matplotlib.pyplot as plt
 
+    set_journal_style()
     filled_out = out
     curve_out = companion_output_path(out, "curve")
     if data.ndim != 2 or data.size == 0:
         die("LDOS matrix must be a non-empty 2D table")
-    fig, ax = plt.subplots(figsize=(7.0, 4.6), dpi=180)
+    fig, ax = plt.subplots(figsize=get_figsize("double_low"), constrained_layout=True)
     y = np.arange(data.shape[0], dtype=float)
+    cmap = resolve_ldos_cmap(LDOS_DEFAULT_CMAP)
+    plot_data = np.clip(data, LDOS_DEFAULT_VMIN, LDOS_DEFAULT_VMAX)
     if energy.size == data.shape[1] and energy.size > 1:
-        mesh = ax.contourf(energy, y, data, levels=80, cmap="turbo")
+        mesh = ax.contourf(energy, y, plot_data, levels=ldos_default_levels(), cmap=cmap, vmin=LDOS_DEFAULT_VMIN, vmax=LDOS_DEFAULT_VMAX)
     else:
-        mesh = ax.imshow(data, origin="lower", aspect="auto", cmap="turbo")
-    fig.colorbar(mesh, ax=ax, label="LDOS")
+        mesh = ax.imshow(plot_data, origin="lower", aspect="auto", cmap=cmap, vmin=LDOS_DEFAULT_VMIN, vmax=LDOS_DEFAULT_VMAX)
+    cbar = fig.colorbar(mesh, ax=ax, label="LDOS", ticks=np.linspace(LDOS_DEFAULT_VMIN, LDOS_DEFAULT_VMAX, 8), fraction=0.035, pad=0.02)
+    style_colorbar(cbar, "LDOS", direction="out")
     ax.set_xlabel(xlabel)
     ax.set_ylabel("Path point")
     ax.set_title(f"LDOS map: {source_name}")
-    fig.tight_layout()
-    fig.savefig(filled_out)
+    style_map_axes(ax)
+    save_journal_figure(fig, filled_out, export_pdf=False, dpi=600)
     plt.close(fig)
 
     profile = np.nanmean(data, axis=0)
     x = energy if energy.size == profile.size else np.arange(profile.size, dtype=float)
-    fig, ax = plt.subplots(figsize=(6.4, 4.2), dpi=180)
+    fig, ax = plt.subplots(figsize=get_figsize("single"), constrained_layout=True)
     ax.plot(x, profile, lw=1.5, color="#1f77b4", label="path-averaged LDOS")
     ax.fill_between(x, profile, 0.0, color="#1f77b4", alpha=0.25, linewidth=0)
     if xlabel.startswith("Energy"):
@@ -3107,10 +3121,9 @@ def plot_ldos_matrix(
     ax.set_xlabel(xlabel)
     ax.set_ylabel("LDOS")
     ax.set_title(f"LDOS curve: {source_name}")
-    ax.legend(frameon=False)
-    ax.grid(alpha=0.25)
-    fig.tight_layout()
-    fig.savefig(curve_out)
+    style_legend(ax)
+    style_grid(ax)
+    save_journal_figure(fig, curve_out, export_pdf=True)
     plt.close(fig)
     return [filled_out, curve_out]
 
@@ -3122,18 +3135,22 @@ def plot_ldos_cube(
 ) -> list[Path]:
     import matplotlib.pyplot as plt
 
+    set_journal_style()
     values = read_cube_values(cube_file)
     filled_out = out
     curve_out = companion_output_path(out, "curve")
     plane = values[:, :, values.shape[2] // 2]
-    fig, ax = plt.subplots(figsize=(6.4, 5.0), dpi=180)
-    mesh = ax.contourf(plane.T, levels=80, cmap="turbo")
-    fig.colorbar(mesh, ax=ax, label="LDOS")
+    fig, ax = plt.subplots(figsize=get_figsize("single_square"), constrained_layout=True)
+    cmap = resolve_ldos_cmap(LDOS_DEFAULT_CMAP)
+    plot_plane = np.clip(plane.T, LDOS_DEFAULT_VMIN, LDOS_DEFAULT_VMAX)
+    mesh = ax.contourf(plot_plane, levels=ldos_default_levels(), cmap=cmap, vmin=LDOS_DEFAULT_VMIN, vmax=LDOS_DEFAULT_VMAX)
+    cbar = fig.colorbar(mesh, ax=ax, label="LDOS", ticks=np.linspace(LDOS_DEFAULT_VMIN, LDOS_DEFAULT_VMAX, 8), fraction=0.035, pad=0.02)
+    style_colorbar(cbar, "LDOS", direction="out")
     ax.set_xlabel("grid x")
     ax.set_ylabel("grid y")
     ax.set_title(f"LDOS filled slice: {cube_file.name}")
-    fig.tight_layout()
-    fig.savefig(filled_out)
+    style_map_axes(ax)
+    save_journal_figure(fig, filled_out, export_pdf=False, dpi=600)
     plt.close(fig)
 
     biases: list[float] = []
@@ -3144,7 +3161,7 @@ def plot_ldos_cube(
             continue
         biases.append(bias)
         averages.append(float(np.nanmean(read_cube_values(path))))
-    fig, ax = plt.subplots(figsize=(6.4, 4.2), dpi=180)
+    fig, ax = plt.subplots(figsize=get_figsize("single"), constrained_layout=True)
     if biases:
         order = np.argsort(np.array(biases))
         x = np.array(biases, dtype=float)[order]
@@ -3161,10 +3178,9 @@ def plot_ldos_cube(
         ax.set_xlabel("grid x")
         ax.set_ylabel("LDOS")
     ax.set_title(f"LDOS curve: {cube_file.name}")
-    ax.legend(frameon=False)
-    ax.grid(alpha=0.25)
-    fig.tight_layout()
-    fig.savefig(curve_out)
+    style_legend(ax)
+    style_grid(ax)
+    save_journal_figure(fig, curve_out, export_pdf=True)
     plt.close(fig)
     return [filled_out, curve_out]
 
@@ -3290,6 +3306,7 @@ def cmd_ldos_line(args) -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    set_journal_style()
     root = args.path.expanduser()
     cubes = find_ldos_cube_files(root)
     if not cubes:
@@ -3320,7 +3337,7 @@ def cmd_ldos_line(args) -> None:
         ldos = gaussian_smooth_energy(ldos, args.energy_step, args.sigma)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(7.2, 4.8), dpi=args.dpi)
+    fig, ax = plt.subplots(figsize=get_figsize("double_low"), dpi=args.dpi, constrained_layout=True)
     cmap = resolve_ldos_cmap(args.cmap)
     vmin = getattr(args, "vmin", None)
     vmax = getattr(args, "vmax", None)
@@ -3339,12 +3356,13 @@ def cmd_ldos_line(args) -> None:
         color_ticks = np.linspace(color_min, color_max, 8 if args.cmap == LDOS1_REFERENCE_CMAP else 6)
     else:
         mesh = ax.contourf(energies, distance, ldos.T, levels=args.levels, cmap=cmap)
-    fig.colorbar(mesh, ax=ax, label="LDOS (arb. units)", ticks=color_ticks)
-    ax.set_xlabel("Energy - $E_F$ (eV)")
-    ax.set_ylabel(f"Distance from {args.atom} to {args.neighbor} (Angstrom)")
+    cbar = fig.colorbar(mesh, ax=ax, label="LDOS (arb. units)", ticks=color_ticks, fraction=0.035, pad=0.02)
+    style_colorbar(cbar, "LDOS (arb. units)", direction="out")
+    ax.set_xlabel(EFERMI_RELATIVE_LABEL)
+    ax.set_ylabel("Distance along path (Angstrom)")
     ax.set_title(f"Line LDOS: {args.atom} -> {args.neighbor}")
-    fig.tight_layout()
-    fig.savefig(args.out)
+    style_map_axes(ax)
+    save_journal_figure(fig, args.out, export_pdf=False, dpi=600)
     plt.close(fig)
 
     csv_path = args.out.with_suffix(".csv")
@@ -3366,6 +3384,7 @@ def cmd_plot_band(args) -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    set_journal_style()
     root = args.path.expanduser()
     band_data = load_band_plot_data(root, args.file, args.kpt, args.fermi)
     x = band_data["x"]
@@ -3378,7 +3397,7 @@ def cmd_plot_band(args) -> None:
     block_note = band_data["block_note"]
     gap_info = analyze_band_gap(bands, x, ticks, labels)
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(7.0, 5.0), dpi=args.dpi)
+    fig, ax = plt.subplots(figsize=get_figsize("single_tall"), dpi=args.dpi, constrained_layout=True)
     pband_file = args.pband_file or find_pband_file(root)
     pband_channels = load_projected_band_channels(pband_file, bands.shape)
     plot_band_axes(ax, x, bands, ticks, labels, pband_channels, linewidth=args.linewidth, color=args.color)
@@ -3393,8 +3412,7 @@ def cmd_plot_band(args) -> None:
     set_energy_ticks(ax, args.emin, args.emax)
     if args.title:
         ax.set_title(args.title)
-    fig.tight_layout()
-    fig.savefig(args.out)
+    save_journal_figure(fig, args.out, export_pdf=True)
     plt.close(fig)
     source = f" from {fermi_log}" if fermi_log else ""
     projection = f"; orbital colors from {pband_file}" if pband_channels and pband_file else ""
@@ -3411,6 +3429,7 @@ def cmd_plot_band_pdos(args) -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    set_journal_style()
     band_root = args.band_path.expanduser()
     band_data = load_band_plot_data(band_root, args.band_file, args.kpt, args.fermi)
     x = band_data["x"]
@@ -3436,7 +3455,7 @@ def cmd_plot_band_pdos(args) -> None:
     fig, (band_ax, pdos_ax) = plt.subplots(
         1,
         2,
-        figsize=(9.0, 5.0),
+        figsize=get_figsize("double_low"),
         dpi=args.dpi,
         sharey=True,
         constrained_layout=True,
@@ -3469,9 +3488,9 @@ def cmd_plot_band_pdos(args) -> None:
     pdos_ax.set_ylim(args.emin, args.emax)
     pdos_ax.set_xlim(0.0, pdos_xmax)
     if not args.no_legend and orbital_pdos:
-        pdos_ax.legend(frameon=False, fontsize=8, loc="best")
+        style_legend(pdos_ax)
 
-    fig.savefig(args.out)
+    save_journal_figure(fig, args.out, export_pdf=True)
     plt.close(fig)
     source = f" from {fermi_log}" if fermi_log else ""
     projection = f"; orbital colors from {pband_file}" if pband_channels and pband_file else ""
@@ -3488,6 +3507,7 @@ def cmd_plot_dos(args) -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    set_journal_style()
     input_root = args.path.expanduser()
     root = resolve_out_path(input_root)
     plot_fermi = args.fermi
@@ -3512,7 +3532,7 @@ def cmd_plot_dos(args) -> None:
             die(f"cannot find DOS file under {root}")
         data = read_numeric_table(dos_file)
         x, xlabel = maybe_shift_fermi(data[:, 0], plot_fermi)
-        fig, ax = plt.subplots(figsize=(6.0, 4.0), dpi=180)
+        fig, ax = plt.subplots(figsize=get_figsize("single"), constrained_layout=True)
         for col in range(1, data.shape[1]):
             label = dos_file.name if data.shape[1] == 2 else f"{dos_file.name}: col{col + 1}"
             ax.plot(x, data[:, col], lw=1.5, label=label)
@@ -3521,10 +3541,9 @@ def cmd_plot_dos(args) -> None:
         ax.set_xlim(DOS_PLOT_EMIN, DOS_PLOT_EMAX)
         ax.set_xlabel(xlabel)
         ax.set_ylabel("DOS")
-        ax.legend(frameon=False)
-        ax.grid(alpha=0.25)
-        fig.tight_layout()
-        fig.savefig(args.out)
+        style_legend(ax)
+        style_grid(ax)
+        save_journal_figure(fig, args.out, export_pdf=True)
         plt.close(fig)
         source = f" from {fermi_log}" if fermi_log else ""
         fermi_note = f"; E_F = {plot_fermi:.9f} eV{source}" if plot_fermi is not None else ""
@@ -3546,7 +3565,7 @@ def cmd_plot_dos(args) -> None:
         if not groups:
             die("selected PDOS channels are not present in the PDOS file")
         x, xlabel = maybe_shift_fermi(energies, plot_fermi)
-        fig, ax = plt.subplots(figsize=(6.4, 4.2), dpi=180)
+        fig, ax = plt.subplots(figsize=get_figsize("single"), constrained_layout=True)
         for (species, orbital), values in sorted(groups.items()):
             color = PDOS_CHANNEL_COLORS.get((species, orbital), ORBITAL_COLORS.get(orbital))
             label = f"{species}-{orbital}"
@@ -3557,10 +3576,9 @@ def cmd_plot_dos(args) -> None:
         ax.set_xlim(DOS_PLOT_EMIN, DOS_PLOT_EMAX)
         ax.set_xlabel(xlabel)
         ax.set_ylabel("PDOS")
-        ax.legend(frameon=False, ncol=2)
-        ax.grid(alpha=0.25)
-        fig.tight_layout()
-        fig.savefig(args.out)
+        style_legend(ax, ncol=2)
+        style_grid(ax)
+        save_journal_figure(fig, args.out, export_pdf=True)
         plt.close(fig)
         source = f" from {fermi_log}" if fermi_log else ""
         fermi_note = f"; E_F = {plot_fermi:.9f} eV{source}" if plot_fermi is not None else ""
@@ -3680,6 +3698,9 @@ LDOS1_REFERENCE_COLORS = [
     (0.88, "#ffd400"),
     (1.0, "#ffff2a"),
 ]
+LDOS_DEFAULT_CMAP = LDOS1_REFERENCE_CMAP
+LDOS_DEFAULT_VMIN = 0.0
+LDOS_DEFAULT_VMAX = 0.10
 ELEMENT_PLOT_COLORS = {
     "H": "#f7f7f7",
     "C": "#444444",
@@ -3711,6 +3732,10 @@ def resolve_ldos_cmap(cmap: str):
     from matplotlib.colors import LinearSegmentedColormap
 
     return LinearSegmentedColormap.from_list(LDOS1_REFERENCE_CMAP, LDOS1_REFERENCE_COLORS)
+
+
+def ldos_default_levels(count: int = 80) -> np.ndarray:
+    return np.linspace(LDOS_DEFAULT_VMIN, LDOS_DEFAULT_VMAX, count)
 
 
 def elf_range_levels(vmax: float, vmin: float = 0.0) -> list[float]:
@@ -4014,10 +4039,11 @@ def plot_elf_plane_map(
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from mpl_toolkits.axes_grid1 import make_axes_locatable
 
+    set_journal_style()
     out.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(5.4, 6.6), dpi=300)
+    fig = plt.figure(figsize=get_figsize("single_square"))
+    ax, cax = add_square_map_axes(fig)
     cmap_obj = resolve_elf_cmap(cmap)
     clipped_elf = np.clip(elf, vmin, vmax)
     if style == "contour":
@@ -4028,15 +4054,13 @@ def plot_elf_plane_map(
         mappable = ax.contourf(u_grid, v_grid, clipped_elf, levels=fill_levels, cmap=cmap_obj, vmin=vmin, vmax=vmax)
         ticks = elf_range_levels(vmax, vmin)
     draw_elf_projected_atoms(ax, projected_atoms, selected_atoms)
-    ax.set_aspect("equal", adjustable="box")
+    ax.set_aspect("auto")
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
-    ax.tick_params(direction="out", length=3.5, width=0.8)
-    divider = make_axes_locatable(ax)
-    cax = divider.append_axes("right", size="5%", pad=0.08)
-    fig.colorbar(mappable, cax=cax, ticks=ticks)
-    fig.tight_layout()
-    fig.savefig(out, bbox_inches="tight")
+    style_map_axes(ax, matched_ticks=True)
+    cbar = fig.colorbar(mappable, cax=cax, ticks=ticks)
+    style_colorbar(cbar, direction="out")
+    save_journal_figure(fig, out, export_pdf=False, dpi=600, bbox_tight=False)
     plt.close(fig)
 
 
@@ -4066,8 +4090,19 @@ def plot_elf_interpolation_compare(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    set_journal_style()
     out.parent.mkdir(parents=True, exist_ok=True)
-    fig, axes_plot = plt.subplots(1, 3, figsize=(12.6, 4.8), dpi=240, sharex=True, sharey=True)
+    fig = plt.figure(figsize=get_figsize("triple_panel"))
+    axes_plot = []
+    left = 0.065
+    bottom = 0.19
+    height = 0.58
+    gap = 0.035
+    fig_width, fig_height = fig.get_size_inches()
+    width = height * fig_height / fig_width
+    for panel in range(3):
+        axes_plot.append(fig.add_axes([left + panel * (width + gap), bottom, width, height]))
+    cax = fig.add_axes([left + 3 * width + 2 * gap + 0.02, bottom, 0.02, height])
     im = None
     cmap_obj = resolve_elf_cmap(cmap)
     for ax, (label, order) in zip(axes_plot, [("Nearest grid", 0), ("Linear interpolation", 1), ("Cubic interpolation", 3)]):
@@ -4075,12 +4110,15 @@ def plot_elf_interpolation_compare(
         clipped_elf = np.clip(elf, vmin, vmax)
         im = ax.contourf(u_grid, v_grid, clipped_elf, levels=np.linspace(vmin, vmax, ELF_FILL_LEVEL_COUNT), cmap=cmap_obj, vmin=vmin, vmax=vmax)
         draw_elf_projected_atoms(ax, projected_atoms, selected_atoms)
-        ax.set_title(label, fontsize=10)
-        ax.set_aspect("equal", adjustable="box")
+        ax.set_title(label)
+        ax.set_aspect("auto")
+        ax.set_box_aspect(1)
         ax.set_xlabel(xlabel)
+        style_map_axes(ax, matched_ticks=True)
     axes_plot[0].set_ylabel(ylabel)
-    fig.colorbar(im, ax=axes_plot.ravel().tolist(), ticks=elf_range_levels(vmax, vmin), pad=0.015)
-    fig.savefig(out, bbox_inches="tight")
+    cbar = fig.colorbar(im, cax=cax, ticks=elf_range_levels(vmax, vmin))
+    style_colorbar(cbar, direction="out")
+    save_journal_figure(fig, out, export_pdf=False, dpi=600, bbox_tight=False)
     plt.close(fig)
 
 
@@ -4122,22 +4160,21 @@ def write_elf_line_profile(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots(figsize=(5.8, 3.6), dpi=300)
+    set_journal_style()
+    fig, ax = plt.subplots(figsize=get_figsize("single"), constrained_layout=True)
     ax.plot(distance, nearest, color="0.65", lw=1.0, label="Nearest grid")
     ax.plot(distance, linear, color="#1f77b4", lw=1.35, label="Linear")
     ax.plot(distance, cubic, color="#d62728", lw=1.35, label="Cubic")
-    for level in ELF_COLORBAR_TICKS[1:-1]:
-        ax.axhline(level, color="0.88", lw=0.55, zorder=0)
+    ax.grid(False)
     ax.set_xlim(0.0, float(distance[-1]))
     ax.set_ylim(0.0, 1.02)
     ax.set_xlabel(f"Distance along {atom_a['symbol']}-{atom_b['symbol']} line (Angstrom)")
     ax.set_ylabel("ELF")
     ax.set_xticks([0.0, float(distance[-1]) / 2.0, float(distance[-1])])
     ax.set_xticklabels([str(atom_a["symbol"]), f"{float(distance[-1]) / 2.0:.2f}", str(atom_b["symbol"])])
-    ax.legend(frameon=False, fontsize=8)
-    fig.tight_layout()
+    style_legend(ax)
     png_path = prefix.with_name(prefix.name + "_line_profile.png")
-    fig.savefig(png_path, bbox_inches="tight")
+    save_journal_figure(fig, png_path, export_pdf=True)
     plt.close(fig)
     mid_mask = (t >= 0.42) & (t <= 0.58)
     return {
@@ -4170,9 +4207,11 @@ def plot_grid_slice(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    set_journal_style()
     plane, used_index = cube_midplane(values, axis, index)
     out.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(6.4, 4.8), dpi=180)
+    fig = plt.figure(figsize=get_figsize("single_square"))
+    ax, cax = add_square_map_axes(fig)
     data = plane.T
     cmap_obj = resolve_elf_cmap(cmap) if label == "ELF" else cmap
     color_vmin = 0.0 if vmin is None else float(vmin)
@@ -4203,12 +4242,13 @@ def plot_grid_slice(
             ax.clabel(contours, inline=True, fontsize=7, fmt="%.2g")
     ticks = elf_range_levels(color_vmax, color_vmin) if label == "ELF" else None
     colorbar_label = None if label == "ELF" else label
-    fig.colorbar(mappable, ax=ax, label=colorbar_label, ticks=ticks)
+    cbar = fig.colorbar(mappable, cax=cax, label=colorbar_label, ticks=ticks)
+    style_colorbar(cbar, colorbar_label, direction="out")
     ax.set_xlabel("grid")
     ax.set_ylabel("grid")
     ax.set_title(title or f"{label}, {axis} slice {used_index}")
-    fig.tight_layout()
-    fig.savefig(out)
+    style_map_axes(ax, matched_ticks=(label == "ELF"))
+    save_journal_figure(fig, out, export_pdf=False, dpi=600, bbox_tight=False)
     plt.close(fig)
 
 
@@ -5485,6 +5525,36 @@ def apply_input_target_template(state: dict, target: str) -> None:
         state["no_kspacing"] = False
         set_extra_setting(state, "out_chg", "1 3")
         print("Charge-density cube-output template applied. ABACUS will write charge-density cube files.")
+    elif target == "ldos-cube":
+        state["kind"] = "scf"
+        state["dos"] = False
+        state["no_kspacing"] = False
+        set_extra_setting(state, "init_chg", "file")
+        set_extra_setting(state, "read_file_dir", "./")
+        set_extra_setting(state, "out_dos", 0)
+        set_extra_setting(state, "out_chg", 0)
+        set_extra_setting(state, "out_elf", 0)
+        set_extra_setting(state, "out_ldos", "1 6")
+        set_extra_setting(state, "stm_bias", "-2 0.05 81")
+        set_extra_setting(state, "dos_sigma", 0.07)
+        set_extra_setting(state, "dos_edelta_ev", 0.01)
+        print("LDOS cube-output template applied. ABACUS will write LDOS_*eV.cube under OUT.<suffix>.")
+    elif target == "ldos-line":
+        state["kind"] = "scf"
+        state["dos"] = False
+        state["no_kspacing"] = False
+        set_extra_setting(state, "init_chg", "file")
+        set_extra_setting(state, "read_file_dir", "./")
+        set_extra_setting(state, "out_dos", 0)
+        set_extra_setting(state, "out_chg", 0)
+        set_extra_setting(state, "out_elf", 0)
+        set_extra_setting(state, "out_ldos", "2 6")
+        set_extra_setting(state, "ldos_line", "0 0 0 0 0 1 100")
+        set_extra_setting(state, "dos_emin_ev", -2)
+        set_extra_setting(state, "dos_emax_ev", 2)
+        set_extra_setting(state, "dos_edelta_ev", 0.05)
+        set_extra_setting(state, "dos_sigma", 0.07)
+        print("LDOS line-output template applied. ABACUS will write LDOS.txt controlled by ldos_line.")
     elif target == "hybrid-scf":
         state["kind"] = "scf"
         state["dos"] = False
@@ -5769,8 +5839,11 @@ def interactive_collect_report() -> None:
 def interactive_plot_dos() -> None:
     print("\n[11] Plot DOS / PDOS / LDOS\n")
     kind = prompt_choice("Plot kind", ["dos", "pdos", "ldos"], "dos")
+    if kind == "ldos":
+        interactive_ldos_menu()
+        return
     args = argparse.Namespace(
-        path=prompt_path("ABACUS job or OUT.* directory"),
+        path=prompt_path("ABACUS job or OUT.* directory", "."),
         kind=kind,
         file=None,
         select=None,
@@ -5780,6 +5853,157 @@ def interactive_plot_dos() -> None:
     cmd_plot_dos(args)
     print("DOS/PDOS/LDOS plot finished. Exiting abacuskit.")
     raise ProgramExit
+
+
+def safe_filename_token(text: str) -> str:
+    token = re.sub(r"[^A-Za-z0-9_.-]+", "_", text.strip())
+    return token.strip("_") or "atom"
+
+
+def prompt_optional_float(label: str, default: float | None = None) -> float | None:
+    default_text = "" if default is None else f"{default:g}"
+    value = prompt_text(label, default_text)
+    if not value or value.lower() in {"auto", "none"}:
+        return None
+    return float(value)
+
+
+def interactive_ldos_plot_existing() -> None:
+    file_text = prompt_text("Explicit LDOS.txt/LDOS cube file, empty for auto", "")
+    args = argparse.Namespace(
+        path=prompt_path("ABACUS job or OUT.* directory containing LDOS output", "."),
+        kind="ldos",
+        file=Path(file_text).expanduser() if file_text else None,
+        select=None,
+        fermi=None,
+        out=prompt_path("Output PNG", "ldos.png"),
+    )
+    cmd_plot_dos(args)
+    print("LDOS file/cube plot finished. Exiting abacuskit.")
+    raise ProgramExit
+
+
+def interactive_ldos_line_plot() -> None:
+    atom_a, atom_b = parse_interactive_atom_selectors(prompt_text("Two atom indices/selectors, e.g. 69 74 or N:69 Ru:74"), 2, "69 74")
+    emin = prompt_float("Minimum E - EF in eV", -2.0)
+    emax = prompt_float("Maximum E - EF in eV", 2.0)
+    if emin >= emax:
+        die("minimum E - EF must be smaller than maximum E - EF")
+
+    energy_step = 0.05
+    sigma = 0.03
+    points = 150
+    levels = 90
+    cmap = LDOS_DEFAULT_CMAP
+    vmin: float | None = LDOS_DEFAULT_VMIN
+    vmax: float | None = LDOS_DEFAULT_VMAX
+    dpi = 220
+    if prompt_yes_no("Edit advanced LDOS plot settings?", False):
+        energy_step = prompt_float("Energy spacing of LDOS bias cubes in eV", energy_step)
+        sigma = prompt_float("Gaussian broadening sigma in eV", sigma)
+        points = prompt_int("Number of points along atom-atom path", points)
+        levels = prompt_int("Filled-contour level count", levels)
+        cmap = prompt_text("Colormap, e.g. turbo or ldos1", cmap)
+        vmin = prompt_optional_float("Color scale minimum, use auto for automatic", vmin)
+        vmax = prompt_optional_float("Color scale maximum, use auto for automatic", vmax)
+        dpi = prompt_int("Figure DPI", dpi)
+    out_default = f"ldos_line_{safe_filename_token(atom_a)}_{safe_filename_token(atom_b)}.png"
+    args = argparse.Namespace(
+        path=prompt_path("OUT.* directory containing LDOS_*eV.cube files", "."),
+        atom=atom_a,
+        neighbor=atom_b,
+        emin=emin,
+        emax=emax,
+        energy_step=energy_step,
+        sigma=sigma,
+        points=points,
+        levels=levels,
+        cmap=cmap,
+        vmin=vmin,
+        vmax=vmax,
+        dpi=dpi,
+        out=prompt_path("Output PNG", out_default),
+    )
+    cmd_ldos_line(args)
+    print("Two-atom LDOS line plot finished. Exiting abacuskit.")
+    raise ProgramExit
+
+
+def interactive_ldos_input_template(target: str) -> None:
+    state = default_input_state()
+    apply_input_target_template(state, target)
+    state["out"] = Path("INPUT.ldos")
+    if prompt_yes_no("Use default LDOS INPUT settings?", True):
+        run_input_from_state(state)
+        print("LDOS INPUT generation finished. Run ABACUS with this INPUT before plotting.")
+        raise ProgramExit
+
+    state["suffix"] = prompt_text("ABACUS output suffix", state["suffix"])
+    state["out"] = prompt_path("Output INPUT file", str(state["out"]))
+    state["nspin"] = prompt_int("nspin", state["nspin"])
+    state["kspacing"] = prompt_float("kspacing", state["kspacing"])
+    read_file_dir = prompt_text("read_file_dir for previous charge density", get_extra_setting(state, "read_file_dir") or "./")
+    set_extra_setting(state, "read_file_dir", read_file_dir)
+    if target == "ldos-cube":
+        bias_start = prompt_float("First STM/LDOS bias in eV", -2.0)
+        bias_step = prompt_float("Bias step in eV", 0.05)
+        bias_count = prompt_int("Number of bias points", 81)
+        if bias_step <= 0.0 or bias_count < 1:
+            die("bias step must be positive and point count must be at least 1")
+        set_extra_setting(state, "stm_bias", f"{bias_start:g} {bias_step:g} {bias_count}")
+    else:
+        ldos_line = prompt_text(
+            "ldos_line direct coords: x1 y1 z1 x2 y2 z2 points",
+            get_extra_setting(state, "ldos_line") or "0 0 0 0 0 1 100",
+        )
+        set_extra_setting(state, "ldos_line", ldos_line)
+        emin = prompt_float("LDOS line dos_emin_ev", -2.0)
+        emax = prompt_float("LDOS line dos_emax_ev", 2.0)
+        delta = prompt_float("LDOS line dos_edelta_ev", 0.05)
+        if emin >= emax or delta <= 0.0:
+            die("dos_emin_ev must be smaller than dos_emax_ev, and dos_edelta_ev must be positive")
+        set_extra_setting(state, "dos_emin_ev", f"{emin:g}")
+        set_extra_setting(state, "dos_emax_ev", f"{emax:g}")
+        set_extra_setting(state, "dos_edelta_ev", f"{delta:g}")
+    if prompt_yes_no("Edit extra INPUT key=value settings?", False):
+        while True:
+            item = prompt_text("Extra INPUT key=value, empty to finish", "")
+            if not item:
+                break
+            key, value = parse_key_value(item)
+            set_extra_setting(state, key, value)
+    run_input_from_state(state)
+    print("LDOS INPUT generation finished. Run ABACUS with this INPUT before plotting.")
+    raise ProgramExit
+
+
+def interactive_ldos_menu() -> None:
+    print(
+        """
+---------- 11x: LDOS ----------
+  111) Plot existing LDOS.txt or LDOS cube output
+  112) Plot two-atom LDOS line from LDOS_*eV.cube files
+  113) Generate INPUT for LDOS cube output (out_ldos=1)
+  114) Generate INPUT for ABACUS LDOS line text output (out_ldos=2)
+  0) Back to previous menu
+  q) Quit abacuskit
+"""
+    )
+    choice = prompt_text("Enter 11x option", "112").lower()
+    if choice in {"q", "quit", "exit"}:
+        raise ProgramExit
+    if choice in {"0", "110"}:
+        return
+    if choice == "111":
+        interactive_ldos_plot_existing()
+    elif choice == "112":
+        interactive_ldos_line_plot()
+    elif choice == "113":
+        interactive_ldos_input_template("ldos-cube")
+    elif choice == "114":
+        interactive_ldos_input_template("ldos-line")
+    else:
+        print("Unknown 11x option.")
 
 
 def interactive_plot_band() -> None:
@@ -6506,7 +6730,7 @@ def cmd_cohp(args) -> None:
     print(f"ICOHP = {metadata['icohp_raw_ev']:.6f} eV")
     print(f"-ICOHP = {metadata['minus_icohp_ev']:.6f} eV")
     print(f"raw COHP: {metadata['files']['raw']}")
-    print(f"E-E_Fermi COHP: {metadata['files']['shifted']}")
+    print(f"E-E_F COHP: {metadata['files']['shifted']}")
     print(f"ICOHP summary: {metadata['files']['icohp']}")
     if metadata["files"]["plot"]:
         print(f"plot: {metadata['files']['plot']}")
@@ -6885,15 +7109,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("path", type=Path, help="ABACUS job directory or OUT.* directory containing LDOS_*eV.cube files")
     p.add_argument("--atom", required=True, help="start atom selector, e.g. N:69")
     p.add_argument("--neighbor", required=True, help="end atom selector, e.g. Ru:74")
-    p.add_argument("--emin", type=float, default=-2.0, help="minimum Energy - EF in eV")
-    p.add_argument("--emax", type=float, default=2.0, help="maximum Energy - EF in eV")
+    p.add_argument("--emin", type=float, default=-2.0, help="minimum E - EF in eV")
+    p.add_argument("--emax", type=float, default=2.0, help="maximum E - EF in eV")
     p.add_argument("--energy-step", type=float, default=0.05, help="energy spacing of LDOS bias cubes in eV")
-    p.add_argument("--sigma", type=float, default=0.08, help="Gaussian broadening in eV")
+    p.add_argument("--sigma", type=float, default=0.03, help="Gaussian broadening in eV")
     p.add_argument("--points", type=int, default=150, help="number of points along the atom-atom path")
     p.add_argument("--levels", type=int, default=90, help="filled-contour level count")
-    p.add_argument("--cmap", default="turbo", help="matplotlib colormap; use ldos1 for the LDOS1.png-like color scale")
-    p.add_argument("--vmin", type=float, help="minimum plotted LDOS value for color scale")
-    p.add_argument("--vmax", type=float, help="maximum plotted LDOS value for color scale")
+    p.add_argument("--cmap", default=LDOS_DEFAULT_CMAP, help="matplotlib colormap; default ldos1 matches the LDOS1.png-like color scale")
+    p.add_argument("--vmin", type=float, default=LDOS_DEFAULT_VMIN, help="minimum plotted LDOS value for color scale")
+    p.add_argument("--vmax", type=float, default=LDOS_DEFAULT_VMAX, help="maximum plotted LDOS value for color scale")
     p.add_argument("--dpi", type=int, default=220)
     p.add_argument("--out", type=Path, required=True)
     p.set_defaults(func=cmd_ldos_line)

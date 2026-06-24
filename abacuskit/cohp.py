@@ -9,6 +9,11 @@ from pathlib import Path
 
 import numpy as np
 
+try:
+    from .plot_style import EFERMI_RELATIVE_LABEL, get_figsize, save_journal_figure, set_journal_style
+except ImportError:
+    from plot_style import EFERMI_RELATIVE_LABEL, get_figsize, save_journal_figure, set_journal_style
+
 RY_TO_EV = 13.605693009
 SHELL_ORDER = ["s", "p", "d", "f", "g"]
 SHELL_MULTIPLICITY = {"s": 1, "p": 3, "d": 5, "f": 7, "g": 9}
@@ -587,6 +592,7 @@ def plot_cohp(path: Path, energy: np.ndarray, values: np.ndarray, efermi: float,
     except ImportError:
         return None
 
+    set_journal_style()
     x = -values if invert else values
     y = energy - efermi
     mask = np.ones(len(y), dtype=bool)
@@ -601,20 +607,19 @@ def plot_cohp(path: Path, energy: np.ndarray, values: np.ndarray, efermi: float,
     if width is None:
         width = max(abs(float(np.min(x))), abs(float(np.max(x))), 1.0e-12)
 
-    plt.figure(figsize=(4.5, 7.0))
-    plt.plot(x, y, lw=1.0)
-    plt.axvline(0.0, color="black", lw=0.6)
+    fig, ax = plt.subplots(figsize=get_figsize("single_tall"), constrained_layout=True)
+    ax.plot(x, y, lw=1.0)
+    ax.axvline(0.0, color="black", lw=0.6)
     if (emin is None or emin <= 0.0) and (emax is None or emax >= 0.0):
-        plt.axhline(0.0, color="black", lw=0.6, ls="--")
-    plt.fill_betweenx(y, x, 0.0, where=(y <= 0.0), alpha=0.25)
-    plt.xlim(-width, width)
+        ax.axhline(0.0, color="black", lw=0.6, ls="--")
+    ax.fill_betweenx(y, x, 0.0, where=(y <= 0.0), alpha=0.25)
+    ax.set_xlim(-width, width)
     if emin is not None or emax is not None:
-        plt.ylim(emin, emax)
-    plt.xlabel(("-" if invert else "") + method)
-    plt.ylabel("Energy - E_Fermi (eV)")
-    plt.tight_layout()
-    plt.savefig(path, dpi=300)
-    plt.close()
+        ax.set_ylim(emin, emax)
+    ax.set_xlabel(("-" if invert else "") + method)
+    ax.set_ylabel(EFERMI_RELATIVE_LABEL)
+    save_journal_figure(fig, path, export_pdf=True)
+    plt.close(fig)
     return path
 
 
@@ -655,7 +660,7 @@ def run_cohp(
     png_path = prefix.with_suffix(".png")
     raw_path.parent.mkdir(parents=True, exist_ok=True)
     np.savetxt(raw_path, np.column_stack([energy, values]), header=f"Energy(eV) {method}")
-    np.savetxt(shifted_path, np.column_stack([energy - efermi, values]), header=f"Energy-E_Fermi(eV) {method}")
+    np.savetxt(shifted_path, np.column_stack([energy - efermi, values]), header=f"E-E_F(eV) {method}")
     icohp = integrate_to_fermi(energy, values, efermi)
     icohp_path.write_text(
         "\n".join(

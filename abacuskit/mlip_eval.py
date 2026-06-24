@@ -12,6 +12,11 @@ from typing import Iterable
 
 import numpy as np
 
+try:
+    from .plot_style import add_panel_label, get_figsize, save_journal_figure, set_journal_style
+except ImportError:
+    from plot_style import add_panel_label, get_figsize, save_journal_figure, set_journal_style
+
 EV_PER_A3_TO_GPA = 160.21766208
 DEFAULT_COMPONENTS = ("xx", "xy", "xz", "yx", "yy", "yz", "zx", "zy", "zz")
 
@@ -454,7 +459,7 @@ def _panel(fig, spec, quantity: QuantityData, color: str, letter: str | None = N
         fontsize=9,
     )
     if letter:
-        ax.text(-0.15, 1.18, f"({letter})", transform=ax.transAxes, fontsize=13, fontweight="bold")
+        add_panel_label(ax, f"({letter})")
 
     bins = min(60, max(12, int(np.sqrt(ref.size))))
     ax_top.hist(ref, bins=bins, range=_hist_range(ref), color=color, alpha=0.45)
@@ -487,14 +492,16 @@ def _write_figure(path: Path, quantities: list[QuantityData], title: str | None,
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    set_journal_style()
     colors = {"energy": "#1f77b4", "relative_energy": "#1f77b4", "force": "#2ca02c", "stress": "#ff7f0e", "virial": "#ff7f0e"}
-    fig = plt.figure(figsize=(5.2 * len(quantities), 5.2), dpi=dpi)
+    figsize_kind = "single_square" if len(quantities) == 1 else "double"
+    fig = plt.figure(figsize=get_figsize(figsize_kind), dpi=dpi, constrained_layout=True)
     grid = fig.add_gridspec(1, len(quantities), wspace=0.34)
     for idx, quantity in enumerate(quantities):
         _panel(fig, grid[0, idx], quantity, colors.get(quantity.key, f"C{idx}"), chr(ord("a") + idx))
     if title:
-        fig.suptitle(title, fontsize=13)
-    fig.savefig(path, dpi=dpi, bbox_inches="tight")
+        fig.suptitle(title)
+    save_journal_figure(fig, path, export_pdf=Path(path).suffix.lower() != ".pdf")
     plt.close(fig)
     return path
 

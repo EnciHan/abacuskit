@@ -18,7 +18,7 @@
 ## v1.2.4 更新记录
 
 - 新增投影能带绘图：自动读取 `pbands1.xml`，按 `s/p/d/f/g` 轨道给 band 着色，并保持高对称路径断点不被错误直连。
-- 新增 BAND+PDOS 联合绘图：左侧 BAND、右侧竖向 PDOS，共享 `Energy - E_F` 纵轴，轨道颜色与投影能带一致。
+- 新增 BAND+PDOS 联合绘图：左侧 BAND、右侧竖向 PDOS，共享 `E - E_F` 纵轴，轨道颜色与投影能带一致。
 - BAND+PDOS 默认纵轴范围调整为 `-10` 到 `10` eV，PDOS 横向强度按当前能量窗口自动缩放，并支持 `--pdos-max` 手动指定。
 
 ## v1.2.3 更新记录
@@ -564,7 +564,27 @@ abacuskit plot-dos OUT.ABACUS \
   --out ldos.png
 ```
 
-LDOS 支持 ABACUS 的 `LDOS.txt` 线扫描文件；如果输出的是 `LDOS_*eV.cube`，脚本会自动画 cube 中间切片。菜单里输入 `11` 可以交互式绘制 DOS、PDOS 或 LDOS。
+普通 ELF 计算不会自动产生 LDOS 数据；需要先让 ABACUS 输出 `LDOS.txt` 或 `LDOS_*eV.cube`。LDOS 支持 ABACUS 的 `LDOS.txt` 线扫描文件；如果输出的是 `LDOS_*eV.cube`，脚本会自动画 cube 中间切片。两原子间的线性 LDOS 可由 `LDOS_*eV.cube` 序列后处理得到：
+
+```bash
+abacuskit ldos-line OUT.ABACUS \
+  --atom 69 \
+  --neighbor 74 \
+  --emin -2 \
+  --emax 2 \
+  --out ldos_line_69_74.png
+```
+
+交互菜单输入 `11` 后选择 `ldos` 会进入 LDOS 子菜单：
+
+```text
+111  Plot existing LDOS.txt or LDOS cube output
+112  Plot two-atom LDOS line from LDOS_*eV.cube files
+113  Generate INPUT for LDOS cube output (out_ldos=1)
+114  Generate INPUT for ABACUS LDOS line text output (out_ldos=2)
+```
+
+其中 `113` 会生成包含 `out_ldos 1 6` 和 `stm_bias` 的 INPUT，用于输出 `LDOS_*eV.cube`；`114` 会生成包含 `out_ldos 2 6` 和 `ldos_line` 的 INPUT，用于 ABACUS 自己输出 `LDOS.txt`。
 
 BAND+PDOS 联合图使用 `plot-band-pdos`，默认纵轴范围为 `-10` 到 `10` eV，PDOS 横向强度会按当前能量窗口自动缩放。
 
