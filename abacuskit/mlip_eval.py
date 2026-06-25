@@ -39,6 +39,8 @@ class MLIPEvalConfig:
     fmt: str = "png"
     outlier_sigma: float = 4.0
     top_outliers: int = 20
+    energy_range: tuple[float, float] | None = None
+    force_range: tuple[float, float] | None = None
 
 
 @dataclass
@@ -409,6 +411,31 @@ def _axis_limits(ref: np.ndarray, pred: np.ndarray) -> tuple[float, float]:
     return lo - pad, hi + pad
 
 
+def _axis_ticks_and_limits(ref: np.ndarray, pred: np.ndarray, axis_range: tuple[float, float] | None = None) -> tuple[np.ndarray, float, float]:
+    from matplotlib.ticker import MaxNLocator
+
+    if axis_range is None:
+        lo, hi = _axis_limits(ref, pred)
+    else:
+        lo, hi = axis_range
+        if not (np.isfinite(lo) and np.isfinite(hi) and hi > lo):
+            raise ValueError("axis range must contain two finite values with max > min")
+        return np.linspace(lo, hi, 5), float(lo), float(hi)
+    ticks = MaxNLocator(nbins=4, steps=[1, 2, 2.5, 5, 10]).tick_values(lo, hi)
+    ticks = ticks[np.isfinite(ticks)]
+    if ticks.size < 2:
+        ticks = np.array([lo, hi], dtype=float)
+    return ticks, float(ticks[0]), float(ticks[-1])
+
+
+def _format_axis_tick(value: float, _position: int) -> str:
+    if abs(value) < 1.0e-12:
+        return "0"
+    if math.isclose(value, round(value), rel_tol=0.0, abs_tol=1.0e-10):
+        return str(int(round(value)))
+    return f"{value:.4g}"
+
+
 def _hist_range(values: np.ndarray) -> tuple[float, float]:
     finite = values[np.isfinite(values)]
     if finite.size == 0:
@@ -432,8 +459,8 @@ def _panel_color(quantity: QuantityData, default_color: str) -> str:
     return default_color
 
 
-def _panel(fig, spec, quantity: QuantityData, color: str, letter: str | None = None) -> None:
-    from matplotlib.ticker import LinearLocator
+def _panel(fig, spec, quantity: QuantityData, color: str, letter: str | None = None, axis_range: tuple[float, float] | None = None) -> None:
+    from matplotlib.ticker import FuncFormatter
     from mpl_toolkits.axes_grid1 import make_axes_locatable
     from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
@@ -445,7 +472,7 @@ def _panel(fig, spec, quantity: QuantityData, color: str, letter: str | None = N
     ref = quantity.ref
     pred = quantity.pred
     residual = quantity.residual
-    lo, hi = _axis_limits(ref, pred)
+    ticks, lo, hi = _axis_ticks_and_limits(ref, pred, axis_range)
     panel_color = _panel_color(quantity, color)
 
     ax.scatter(ref, pred, s=12 if quantity.key in {"energy", "relative_energy"} else 7, color=panel_color, alpha=0.45, linewidths=0)
@@ -455,8 +482,10 @@ def _panel(fig, spec, quantity: QuantityData, color: str, letter: str | None = N
     ax.set_aspect("equal", adjustable="box")
     ax.set_xlabel(f"{quantity.ref_label} ({quantity.axis_unit})")
     ax.set_ylabel(f"{quantity.pred_label} ({quantity.axis_unit})")
-    ax.xaxis.set_major_locator(LinearLocator(5))
-    ax.yaxis.set_major_locator(LinearLocator(5))
+    ax.set_xticks(ticks)
+    ax.set_yticks(ticks)
+    ax.xaxis.set_major_formatter(FuncFormatter(_format_axis_tick))
+    ax.yaxis.set_major_formatter(FuncFormatter(_format_axis_tick))
     ax.tick_params(direction="in")
 
     metrics = _metrics(quantity)
@@ -500,7 +529,15 @@ def _panel(fig, spec, quantity: QuantityData, color: str, letter: str | None = N
         spine.set_linewidth(0.8)
 
 
-def _write_figure(path: Path, quantities: list[QuantityData], title: str | None, dpi: int) -> Path:
+def _quantity_axis_range(quantity: QuantityData, energy_range: tuple[float, float] | None, force_range: tuple[float, float] | None) -> tuple[float, float] | None:
+    if quantity.key in {"energy", "relative_energy"}:
+        return energy_range
+    if quantity.key == "force":
+        return force_range
+    return None
+
+
+def _write_figure(path: Path, quantities: list[QuantityData], title: str | None, dpi: int, energy_range: tuple[float, float] | None = None, force_range: tuple[float, float] | None = None) -> Path:
     os.environ.setdefault("MPLCONFIGDIR", "/tmp/abacuskit-matplotlib")
     import matplotlib
 
@@ -513,7 +550,7 @@ def _write_figure(path: Path, quantities: list[QuantityData], title: str | None,
     fig = plt.figure(figsize=get_figsize(figsize_kind), dpi=dpi, constrained_layout=True)
     grid = fig.add_gridspec(1, len(quantities), wspace=0.34)
     for idx, quantity in enumerate(quantities):
-        _panel(fig, grid[0, idx], quantity, colors.get(quantity.key, f"C{idx}"), chr(ord("a") + idx))
+        _panel(fig, grid[0, idx], quantity, colors.get(quantity.key, f"C{idx}"), chr(ord("a") + idx), _quantity_axis_range(quantity, energy_range, force_range))
     if title:
         fig.suptitle(title)
     save_journal_figure(fig, path, export_pdf=Path(path).suffix.lower() != ".pdf")
@@ -521,8 +558,8 @@ def _write_figure(path: Path, quantities: list[QuantityData], title: str | None,
     return path
 
 
-def _write_single_figure(path: Path, quantity: QuantityData, title: str | None, dpi: int) -> Path:
-    return _write_figure(path, [quantity], None, dpi)
+def _write_single_figure(path: Path, quantity: QuantityData, title: str | None, dpi: int, energy_range: tuple[float, float] | None = None, force_range: tuple[float, float] | None = None) -> Path:
+    return _write_figure(path, [quantity], None, dpi, energy_range, force_range)
 
 
 def _outlier_rows(quantity: QuantityData, sigma: float, top_n: int) -> list[dict[str, object]]:
@@ -657,7 +694,7 @@ def run_mlip_eval(config: MLIPEvalConfig) -> dict[str, object]:
 
     figure_paths: list[Path] = []
     if len(quantities) > 1:
-        figure_paths.append(_write_figure(out / f"{config.prefix}_mlip_eval_overview.{config.fmt}", quantities, config.title, config.dpi))
+        figure_paths.append(_write_figure(out / f"{config.prefix}_mlip_eval_overview.{config.fmt}", quantities, config.title, config.dpi, config.energy_range, config.force_range))
 
     for quantity in quantities:
         subdir = out / quantity.key
@@ -668,6 +705,8 @@ def run_mlip_eval(config: MLIPEvalConfig) -> dict[str, object]:
                 quantity,
                 f"{quantity.title} parity",
                 config.dpi,
+                config.energy_range,
+                config.force_range,
             )
         )
 

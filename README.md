@@ -4,11 +4,11 @@
 
 `abacuskit` 是一个集成式 ABACUS + DeepMD 命令行程序，用于生成 ABACUS 输入文件、准备批量任务、检查/汇总计算结果，并把 ABACUS 输出转换为 DeepMD 数据。
 
-- Version: v1.2.5
+- Version: v1.3.0
 - Author: Han Enci, Zhong Lisheng, Yu Yutong, Xu Mengting, Chen Jingyuan
 - Affiliation: Xi'an University of Technology
 
-## v1.2.5 更新记录
+## v1.3.0 更新记录
 
 - 新增 DeepMD/MLIP 相对能量 parity 图：按每个 system 内能量均值归零后绘制，并保持原能量 parity 图的样式与配色。
 - 菜单 `25 -> 5` 改为 `valid/train` 数据集开关，菜单 `25 -> 6` 默认同时输出 `valid` 和 `train` 的相对能量与力 parity 图。
@@ -796,6 +796,16 @@ abacuskit plot-mlip-eval 04_train/000 \
   --prefix valid \
   --out mlip_eval_plots \
   --data-dir 03_deepmd_data/valid
+```
+
+需要固定 parity 图坐标范围时可指定能量/相对能量和力的范围，例如：
+
+```bash
+abacuskit plot-mlip-eval 04_train/000 \
+  --prefix valid \
+  --quantity relative-energy-force \
+  --energy-range -0.4 0.4 \
+  --force-range -2.0 2.0
 ```
 
 默认输出：
