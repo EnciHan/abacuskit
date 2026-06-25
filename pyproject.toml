@@ -21,6 +21,9 @@ dependencies = [
   "numpy",
   "seekpath",
   "spglib",
+  "matplotlib",
+  "scipy",
+  "dpdata",
 ]
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -37,6 +40,7 @@ classifiers = [
 [project.optional-dependencies]
 deepmd = ["dpdata"]
 plot = ["matplotlib", "scipy"]
+all = ["matplotlib", "scipy", "dpdata"]
 dev = ["build", "twine"]
 
 [project.scripts]

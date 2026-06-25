@@ -75,12 +75,13 @@ cd abacuskit
 pip install .
 ```
 
-可选功能依赖：
+默认安装已包含绘图和 DeepMD 数据转换所需的 Python 依赖：
 
 ```bash
-pip install "abacuskit[plot]"      # BAND/DOS/PDOS/LDOS/ELF/电荷密度绘图
-pip install "abacuskit[deepmd]"    # collect-deepmd 数据转换
+pip install abacuskit
 ```
+
+因此 BAND/DOS/PDOS/LDOS/ELF/电荷密度绘图和 `collect-deepmd` 可直接使用；旧的 `abacuskit[plot]`、`abacuskit[deepmd]` 写法仍兼容。
 
 出图默认优先使用 Arial；如果系统没有 Arial，会自动回退到兼容字体并避免 Matplotlib 字体警告。需要安装 Arial 到当前用户字体目录时，可主动执行：
 
