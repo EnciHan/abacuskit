@@ -13,12 +13,16 @@ from typing import Iterable
 import numpy as np
 
 try:
-    from .plot_style import add_panel_label, get_figsize, save_journal_figure, set_journal_style
+    from .plot_style import get_figsize, save_journal_figure, set_journal_style
 except ImportError:
-    from plot_style import add_panel_label, get_figsize, save_journal_figure, set_journal_style
+    from plot_style import get_figsize, save_journal_figure, set_journal_style
 
 EV_PER_A3_TO_GPA = 160.21766208
 DEFAULT_COMPONENTS = ("xx", "xy", "xz", "yx", "yy", "yz", "zx", "zy", "zz")
+ENERGY_HIST_RESIDUAL_COLOR = "#9ECAE1"
+FORCE_HIST_RESIDUAL_COLOR = "#74C476"
+STRESS_HIST_RESIDUAL_COLOR = "#FDAE6B"
+REFERENCE_LINE_COLOR = "#808080"
 
 
 @dataclass
@@ -418,6 +422,16 @@ def _hist_range(values: np.ndarray) -> tuple[float, float]:
     return lo - pad, hi + pad
 
 
+def _panel_color(quantity: QuantityData, default_color: str) -> str:
+    if quantity.key in {"energy", "relative_energy"}:
+        return ENERGY_HIST_RESIDUAL_COLOR
+    if quantity.key == "force":
+        return FORCE_HIST_RESIDUAL_COLOR
+    if quantity.key in {"stress", "virial"}:
+        return STRESS_HIST_RESIDUAL_COLOR
+    return default_color
+
+
 def _panel(fig, spec, quantity: QuantityData, color: str, letter: str | None = None) -> None:
     from mpl_toolkits.axes_grid1 import make_axes_locatable
     from mpl_toolkits.axes_grid1.inset_locator import inset_axes
@@ -431,9 +445,10 @@ def _panel(fig, spec, quantity: QuantityData, color: str, letter: str | None = N
     pred = quantity.pred
     residual = quantity.residual
     lo, hi = _axis_limits(ref, pred)
+    panel_color = _panel_color(quantity, color)
 
-    ax.scatter(ref, pred, s=12 if quantity.key in {"energy", "relative_energy"} else 7, color=color, alpha=0.45, linewidths=0)
-    ax.plot([lo, hi], [lo, hi], color="0.5", lw=1.5, ls="--")
+    ax.scatter(ref, pred, s=12 if quantity.key in {"energy", "relative_energy"} else 7, color=panel_color, alpha=0.45, linewidths=0)
+    ax.plot([lo, hi], [lo, hi], color=REFERENCE_LINE_COLOR, lw=1.5, ls="--")
     ax.set_xlim(lo, hi)
     ax.set_ylim(lo, hi)
     ax.set_aspect("equal", adjustable="box")
@@ -456,15 +471,12 @@ def _panel(fig, spec, quantity: QuantityData, color: str, letter: str | None = N
         transform=ax.transAxes,
         va="top",
         ha="left",
-        fontsize=9,
+        fontsize=7.5,
     )
-    if letter:
-        add_panel_label(ax, f"({letter})")
-
     bins = min(60, max(12, int(np.sqrt(ref.size))))
-    ax_top.hist(ref, bins=bins, range=_hist_range(ref), color=color, alpha=0.45)
+    ax_top.hist(ref, bins=bins, range=_hist_range(ref), color=panel_color, alpha=0.45)
     ax_top.axis("off")
-    ax_right.hist(pred, bins=bins, range=_hist_range(pred), orientation="horizontal", color=color, alpha=0.45)
+    ax_right.hist(pred, bins=bins, range=_hist_range(pred), orientation="horizontal", color=panel_color, alpha=0.45)
     ax_right.axis("off")
 
     inset = inset_axes(ax, width="32%", height="28%", loc="lower right", borderpad=1.2)
@@ -474,7 +486,7 @@ def _panel(fig, spec, quantity: QuantityData, color: str, letter: str | None = N
         residual_plot,
         bins=min(50, max(10, int(np.sqrt(residual_plot.size)))),
         range=_hist_range(residual_plot),
-        color=color,
+        color=panel_color,
         alpha=0.55,
     )
     inset.axvline(0.0, color="black", lw=0.9, ls="--")
@@ -507,8 +519,7 @@ def _write_figure(path: Path, quantities: list[QuantityData], title: str | None,
 
 
 def _write_single_figure(path: Path, quantity: QuantityData, title: str | None, dpi: int) -> Path:
-    single_title = title or f"{quantity.title} parity"
-    return _write_figure(path, [quantity], single_title, dpi)
+    return _write_figure(path, [quantity], None, dpi)
 
 
 def _outlier_rows(quantity: QuantityData, sigma: float, top_n: int) -> list[dict[str, object]]:

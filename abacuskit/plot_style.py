@@ -20,6 +20,37 @@ JOURNAL_PAD_INCHES = 0.03
 JOURNAL_AXES_LINEWIDTH = 1.2
 JOURNAL_TICK_WIDTH = 1.0
 EFERMI_RELATIVE_LABEL = r"$\mathbf{E}-\mathbf{E}_{\mathbf{F}}$ (eV)"
+_ARIAL_FONTS_REGISTERED = False
+
+
+def register_arial_fonts() -> None:
+    """Register user-installed Arial fonts with Matplotlib for this process."""
+    from matplotlib import font_manager
+
+    global _ARIAL_FONTS_REGISTERED
+    if _ARIAL_FONTS_REGISTERED:
+        return
+    font_dirs = [
+        Path.home() / ".local" / "share" / "fonts" / "msttcorefonts",
+        Path.home() / ".fonts",
+        Path("/usr/share/fonts"),
+        Path("/usr/local/share/fonts"),
+    ]
+    seen: set[Path] = set()
+    for font_dir in font_dirs:
+        if not font_dir.exists():
+            continue
+        for font_file in font_dir.rglob("Arial*.TTF"):
+            if font_file in seen:
+                continue
+            seen.add(font_file)
+            font_manager.fontManager.addfont(str(font_file))
+        for font_file in font_dir.rglob("arial*.ttf"):
+            if font_file in seen:
+                continue
+            seen.add(font_file)
+            font_manager.fontManager.addfont(str(font_file))
+    _ARIAL_FONTS_REGISTERED = True
 
 
 def mm_to_inch(mm):
@@ -36,10 +67,17 @@ def set_journal_style() -> None:
     """Apply compact publication-oriented Matplotlib rcParams."""
     import matplotlib as mpl
 
+    register_arial_fonts()
     mpl.rcParams.update(
         {
-            "font.family": "sans-serif",
-            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "font.family": "Arial",
+            "font.sans-serif": ["Arial"],
+            "mathtext.fontset": "custom",
+            "mathtext.rm": "Arial",
+            "mathtext.it": "Arial:italic",
+            "mathtext.bf": "Arial:bold",
+            "mathtext.cal": "Arial",
+            "mathtext.sf": "Arial",
             "font.size": 8,
             "axes.labelsize": 9,
             "xtick.labelsize": 8,
@@ -154,6 +192,22 @@ def style_map_axes(ax, matched_ticks: bool = False, tick_count: int = 5) -> None
         ax.yaxis.set_major_formatter(FuncFormatter(_format_map_tick))
     ax.tick_params(direction="out", length=3.5, width=0.8)
     ax.grid(False)
+
+
+def hide_x_axis_title_and_ticks(ax) -> None:
+    """Hide x-axis title, tick marks, and tick labels while keeping the frame."""
+    ax.set_xlabel("")
+    ax.set_xticks([])
+    ax.tick_params(axis="x", which="both", bottom=False, top=False, labelbottom=False)
+
+
+def hide_xy_axis_title_and_ticks(ax) -> None:
+    """Hide x/y axis titles, tick marks, tick labels, and axes title."""
+    hide_x_axis_title_and_ticks(ax)
+    ax.set_ylabel("")
+    ax.set_yticks([])
+    ax.tick_params(axis="y", which="both", left=False, right=False, labelleft=False)
+    ax.set_title("")
 
 
 def add_square_map_axes(

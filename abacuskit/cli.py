@@ -34,14 +34,14 @@ try:
     from . import __affiliation__, __author__, __version__
     from .bader import run_bader_analysis, write_bader_csv, write_bader_json
     from .cohp import build_orbital_map, format_orbital_map, resolve_orbital_arguments, run_cohp
-    from .plot_style import EFERMI_RELATIVE_LABEL, add_square_map_axes, get_figsize, save_journal_figure, set_journal_style, style_colorbar, style_grid, style_legend, style_map_axes
+    from .plot_style import EFERMI_RELATIVE_LABEL, add_square_map_axes, get_figsize, hide_xy_axis_title_and_ticks, save_journal_figure, set_journal_style, style_colorbar, style_grid, style_legend, style_map_axes
 except ImportError:
     __version__ = "v1.2.5"
     __author__ = "Han Enci, Zhong Lisheng, Yu Yutong, Xu Mengting, Chen Jingyuan"
     __affiliation__ = "Xi'an University of Technology"
     from bader import run_bader_analysis, write_bader_csv, write_bader_json
     from cohp import build_orbital_map, format_orbital_map, resolve_orbital_arguments, run_cohp
-    from plot_style import EFERMI_RELATIVE_LABEL, add_square_map_axes, get_figsize, save_journal_figure, set_journal_style, style_colorbar, style_grid, style_legend, style_map_axes
+    from plot_style import EFERMI_RELATIVE_LABEL, add_square_map_axes, get_figsize, hide_xy_axis_title_and_ticks, save_journal_figure, set_journal_style, style_colorbar, style_grid, style_legend, style_map_axes
 
 BOHR_PER_ANGSTROM = 1.88972612546
 USER_CONFIG_PATH = Path.home() / ".abacuskit" / "config.json"
@@ -3359,7 +3359,7 @@ def cmd_ldos_line(args) -> None:
     cbar = fig.colorbar(mesh, ax=ax, label="LDOS (arb. units)", ticks=color_ticks, fraction=0.035, pad=0.02)
     style_colorbar(cbar, "LDOS (arb. units)", direction="out")
     ax.set_xlabel(EFERMI_RELATIVE_LABEL)
-    ax.set_ylabel("Distance along path (Angstrom)")
+    ax.set_ylabel("Distance along path (Å)")
     ax.set_title(f"Line LDOS: {args.atom} -> {args.neighbor}")
     style_map_axes(ax)
     save_journal_figure(fig, args.out, export_pdf=False, dpi=600)
@@ -4043,7 +4043,10 @@ def plot_elf_plane_map(
     set_journal_style()
     out.parent.mkdir(parents=True, exist_ok=True)
     fig = plt.figure(figsize=get_figsize("single_square"))
-    ax, cax = add_square_map_axes(fig)
+    if style == "contour":
+        ax, cax = add_square_map_axes(fig)
+    else:
+        ax, cax = add_square_map_axes(fig, left=0.055, bottom=0.09, height=0.78, pad=0.02, colorbar_width=0.03)
     cmap_obj = resolve_elf_cmap(cmap)
     clipped_elf = np.clip(elf, vmin, vmax)
     if style == "contour":
@@ -4058,6 +4061,8 @@ def plot_elf_plane_map(
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     style_map_axes(ax, matched_ticks=True)
+    if style != "contour":
+        hide_xy_axis_title_and_ticks(ax)
     cbar = fig.colorbar(mappable, cax=cax, ticks=ticks)
     style_colorbar(cbar, direction="out")
     save_journal_figure(fig, out, export_pdf=False, dpi=600, bbox_tight=False)
@@ -4094,15 +4099,15 @@ def plot_elf_interpolation_compare(
     out.parent.mkdir(parents=True, exist_ok=True)
     fig = plt.figure(figsize=get_figsize("triple_panel"))
     axes_plot = []
-    left = 0.065
-    bottom = 0.19
-    height = 0.58
-    gap = 0.035
+    left = 0.03
+    bottom = 0.10
+    height = 0.68
+    gap = 0.025
     fig_width, fig_height = fig.get_size_inches()
     width = height * fig_height / fig_width
     for panel in range(3):
         axes_plot.append(fig.add_axes([left + panel * (width + gap), bottom, width, height]))
-    cax = fig.add_axes([left + 3 * width + 2 * gap + 0.02, bottom, 0.02, height])
+    cax = fig.add_axes([left + 3 * width + 2 * gap + 0.02, bottom, 0.018, height])
     im = None
     cmap_obj = resolve_elf_cmap(cmap)
     for ax, (label, order) in zip(axes_plot, [("Nearest grid", 0), ("Linear interpolation", 1), ("Cubic interpolation", 3)]):
@@ -4110,12 +4115,11 @@ def plot_elf_interpolation_compare(
         clipped_elf = np.clip(elf, vmin, vmax)
         im = ax.contourf(u_grid, v_grid, clipped_elf, levels=np.linspace(vmin, vmax, ELF_FILL_LEVEL_COUNT), cmap=cmap_obj, vmin=vmin, vmax=vmax)
         draw_elf_projected_atoms(ax, projected_atoms, selected_atoms)
-        ax.set_title(label)
         ax.set_aspect("auto")
         ax.set_box_aspect(1)
         ax.set_xlabel(xlabel)
         style_map_axes(ax, matched_ticks=True)
-    axes_plot[0].set_ylabel(ylabel)
+        hide_xy_axis_title_and_ticks(ax)
     cbar = fig.colorbar(im, cax=cax, ticks=elf_range_levels(vmax, vmin))
     style_colorbar(cbar, direction="out")
     save_journal_figure(fig, out, export_pdf=False, dpi=600, bbox_tight=False)
@@ -4168,7 +4172,7 @@ def write_elf_line_profile(
     ax.grid(False)
     ax.set_xlim(0.0, float(distance[-1]))
     ax.set_ylim(0.0, 1.02)
-    ax.set_xlabel(f"Distance along {atom_a['symbol']}-{atom_b['symbol']} line (Angstrom)")
+    ax.set_xlabel("Distance along path (Å)")
     ax.set_ylabel("ELF")
     ax.set_xticks([0.0, float(distance[-1]) / 2.0, float(distance[-1])])
     ax.set_xticklabels([str(atom_a["symbol"]), f"{float(distance[-1]) / 2.0:.2f}", str(atom_b["symbol"])])
@@ -4211,7 +4215,10 @@ def plot_grid_slice(
     plane, used_index = cube_midplane(values, axis, index)
     out.parent.mkdir(parents=True, exist_ok=True)
     fig = plt.figure(figsize=get_figsize("single_square"))
-    ax, cax = add_square_map_axes(fig)
+    if label == "ELF" and style in {"image", "contourf", "both"}:
+        ax, cax = add_square_map_axes(fig, left=0.055, bottom=0.09, height=0.78, pad=0.02, colorbar_width=0.03)
+    else:
+        ax, cax = add_square_map_axes(fig)
     data = plane.T
     cmap_obj = resolve_elf_cmap(cmap) if label == "ELF" else cmap
     color_vmin = 0.0 if vmin is None else float(vmin)
@@ -4248,6 +4255,8 @@ def plot_grid_slice(
     ax.set_ylabel("grid")
     ax.set_title(title or f"{label}, {axis} slice {used_index}")
     style_map_axes(ax, matched_ticks=(label == "ELF"))
+    if label == "ELF" and style in {"image", "contourf", "both"}:
+        hide_xy_axis_title_and_ticks(ax)
     save_journal_figure(fig, out, export_pdf=False, dpi=600, bbox_tight=False)
     plt.close(fig)
 
@@ -4396,8 +4405,8 @@ def cmd_plot_elf(args) -> None:
     plane_origin: np.ndarray
     u_range: tuple[float, float]
     v_range: tuple[float, float]
-    xlabel = "Plane u coordinate (Angstrom)"
-    ylabel = "Plane v coordinate (Angstrom)"
+    xlabel = "Plane u coordinate (Å)"
+    ylabel = "Plane v coordinate (Å)"
     profile_info: dict[str, float] | None = None
 
     if mode == "bond-plane":
@@ -4423,8 +4432,8 @@ def cmd_plot_elf(args) -> None:
         neighbor_v = float(np.dot(neighbor_pos - center_pos, e_v)) * BOHR_TO_ANGSTROM
         u_range = (min(0.0, neighbor_u) - args.u_pad, max(0.0, neighbor_u) + args.u_pad)
         v_range = (min(center_v, neighbor_v) - args.v_pad_low, max(center_v, neighbor_v) + args.v_pad_high)
-        xlabel = "Distance parallel to surface (Angstrom)"
-        ylabel = f"Distance along {args.surface_axis} normal (Angstrom)"
+        xlabel = "Distance parallel to surface (Å)"
+        ylabel = f"Distance along {args.surface_axis} normal (Å)"
         selected_atoms = {int(center["idx"]), int(neighbor["idx"])}
         summary_lines.extend(
             [
