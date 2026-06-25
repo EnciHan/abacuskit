@@ -41,6 +41,8 @@ class MLIPEvalConfig:
     top_outliers: int = 20
     energy_range: tuple[float, float] | None = None
     force_range: tuple[float, float] | None = None
+    energy_residual_range: tuple[float, float] | None = None
+    force_residual_range: tuple[float, float] | None = None
 
 
 @dataclass
@@ -459,7 +461,15 @@ def _panel_color(quantity: QuantityData, default_color: str) -> str:
     return default_color
 
 
-def _panel(fig, spec, quantity: QuantityData, color: str, letter: str | None = None, axis_range: tuple[float, float] | None = None) -> None:
+def _panel(
+    fig,
+    spec,
+    quantity: QuantityData,
+    color: str,
+    letter: str | None = None,
+    axis_range: tuple[float, float] | None = None,
+    residual_range: tuple[float, float] | None = None,
+) -> None:
     from matplotlib.ticker import FuncFormatter
     from mpl_toolkits.axes_grid1 import make_axes_locatable
     from mpl_toolkits.axes_grid1.inset_locator import inset_axes
@@ -514,13 +524,20 @@ def _panel(fig, spec, quantity: QuantityData, color: str, letter: str | None = N
     inset = inset_axes(ax, width="32%", height="28%", loc="lower right", borderpad=2.0)
     res_scale = _metric_scale(quantity)
     residual_plot = residual * res_scale
+    if residual_range is not None:
+        res_lo, res_hi = residual_range
+        if not (np.isfinite(res_lo) and np.isfinite(res_hi) and res_hi > res_lo):
+            raise ValueError("residual range must contain two finite values with max > min")
+    residual_hist_range = residual_range or _hist_range(residual_plot)
     inset.hist(
         residual_plot,
         bins=min(50, max(10, int(np.sqrt(residual_plot.size)))),
-        range=_hist_range(residual_plot),
+        range=residual_hist_range,
         color=panel_color,
         alpha=0.55,
     )
+    if residual_range is not None:
+        inset.set_xlim(*residual_range)
     inset.axvline(0.0, color="black", lw=0.9, ls="--")
     inset.set_title("Residual", fontsize=8, pad=1)
     inset.set_yticks([])
@@ -537,7 +554,24 @@ def _quantity_axis_range(quantity: QuantityData, energy_range: tuple[float, floa
     return None
 
 
-def _write_figure(path: Path, quantities: list[QuantityData], title: str | None, dpi: int, energy_range: tuple[float, float] | None = None, force_range: tuple[float, float] | None = None) -> Path:
+def _quantity_residual_range(quantity: QuantityData, energy_residual_range: tuple[float, float] | None, force_residual_range: tuple[float, float] | None) -> tuple[float, float] | None:
+    if quantity.key in {"energy", "relative_energy"}:
+        return energy_residual_range
+    if quantity.key == "force":
+        return force_residual_range
+    return None
+
+
+def _write_figure(
+    path: Path,
+    quantities: list[QuantityData],
+    title: str | None,
+    dpi: int,
+    energy_range: tuple[float, float] | None = None,
+    force_range: tuple[float, float] | None = None,
+    energy_residual_range: tuple[float, float] | None = None,
+    force_residual_range: tuple[float, float] | None = None,
+) -> Path:
     os.environ.setdefault("MPLCONFIGDIR", "/tmp/abacuskit-matplotlib")
     import matplotlib
 
@@ -550,7 +584,15 @@ def _write_figure(path: Path, quantities: list[QuantityData], title: str | None,
     fig = plt.figure(figsize=get_figsize(figsize_kind), dpi=dpi, constrained_layout=True)
     grid = fig.add_gridspec(1, len(quantities), wspace=0.34)
     for idx, quantity in enumerate(quantities):
-        _panel(fig, grid[0, idx], quantity, colors.get(quantity.key, f"C{idx}"), chr(ord("a") + idx), _quantity_axis_range(quantity, energy_range, force_range))
+        _panel(
+            fig,
+            grid[0, idx],
+            quantity,
+            colors.get(quantity.key, f"C{idx}"),
+            chr(ord("a") + idx),
+            _quantity_axis_range(quantity, energy_range, force_range),
+            _quantity_residual_range(quantity, energy_residual_range, force_residual_range),
+        )
     if title:
         fig.suptitle(title)
     save_journal_figure(fig, path, export_pdf=Path(path).suffix.lower() != ".pdf")
@@ -558,8 +600,17 @@ def _write_figure(path: Path, quantities: list[QuantityData], title: str | None,
     return path
 
 
-def _write_single_figure(path: Path, quantity: QuantityData, title: str | None, dpi: int, energy_range: tuple[float, float] | None = None, force_range: tuple[float, float] | None = None) -> Path:
-    return _write_figure(path, [quantity], None, dpi, energy_range, force_range)
+def _write_single_figure(
+    path: Path,
+    quantity: QuantityData,
+    title: str | None,
+    dpi: int,
+    energy_range: tuple[float, float] | None = None,
+    force_range: tuple[float, float] | None = None,
+    energy_residual_range: tuple[float, float] | None = None,
+    force_residual_range: tuple[float, float] | None = None,
+) -> Path:
+    return _write_figure(path, [quantity], None, dpi, energy_range, force_range, energy_residual_range, force_residual_range)
 
 
 def _outlier_rows(quantity: QuantityData, sigma: float, top_n: int) -> list[dict[str, object]]:
@@ -694,7 +745,18 @@ def run_mlip_eval(config: MLIPEvalConfig) -> dict[str, object]:
 
     figure_paths: list[Path] = []
     if len(quantities) > 1:
-        figure_paths.append(_write_figure(out / f"{config.prefix}_mlip_eval_overview.{config.fmt}", quantities, config.title, config.dpi, config.energy_range, config.force_range))
+        figure_paths.append(
+            _write_figure(
+                out / f"{config.prefix}_mlip_eval_overview.{config.fmt}",
+                quantities,
+                config.title,
+                config.dpi,
+                config.energy_range,
+                config.force_range,
+                config.energy_residual_range,
+                config.force_residual_range,
+            )
+        )
 
     for quantity in quantities:
         subdir = out / quantity.key
@@ -707,6 +769,8 @@ def run_mlip_eval(config: MLIPEvalConfig) -> dict[str, object]:
                 config.dpi,
                 config.energy_range,
                 config.force_range,
+                config.energy_residual_range,
+                config.force_residual_range,
             )
         )
 

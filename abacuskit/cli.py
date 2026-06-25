@@ -38,7 +38,7 @@ try:
     from .cohp import build_orbital_map, format_orbital_map, resolve_orbital_arguments, run_cohp
     from .plot_style import EFERMI_RELATIVE_LABEL, add_square_map_axes, get_figsize, hide_xy_axis_title_and_ticks, save_journal_figure, set_journal_style, style_colorbar, style_grid, style_legend, style_map_axes
 except ImportError:
-    __version__ = "v1.3.0"
+    __version__ = "v1.3.1"
     __author__ = "Han Enci, Zhong Lisheng, Yu Yutong, Xu Mengting, Chen Jingyuan"
     __affiliation__ = "Xi'an University of Technology"
     from bader import run_bader_analysis, write_bader_csv, write_bader_json
@@ -4630,6 +4630,8 @@ def cmd_plot_mlip_eval(args) -> None:
         top_outliers=args.top_outliers,
         energy_range=tuple(args.energy_range) if getattr(args, "energy_range", None) else None,
         force_range=tuple(args.force_range) if getattr(args, "force_range", None) else None,
+        energy_residual_range=tuple(args.energy_residual_range) if getattr(args, "energy_residual_range", None) else None,
+        force_residual_range=tuple(args.force_residual_range) if getattr(args, "force_residual_range", None) else None,
     )
     try:
         result = run_mlip_eval(config)
@@ -6466,18 +6468,39 @@ def parse_mlip_axis_range(text: str) -> tuple[float, float] | None:
     return lo, hi
 
 
-def interactive_mlip_axis_ranges() -> tuple[tuple[float, float] | None, tuple[float, float] | None]:
-    if not prompt_yes_no("Set custom parity axis ranges?", False):
-        return None, None
-    energy_range = parse_mlip_axis_range(prompt_text("Energy/relative-energy range min max, empty for auto", ""))
-    force_range = parse_mlip_axis_range(prompt_text("Force range min max, empty for auto", ""))
-    return energy_range, force_range
+def format_mlip_range(value: tuple[float, float] | None) -> str:
+    return "auto" if value is None else f"{value[0]:g} to {value[1]:g}"
+
+
+def interactive_mlip_range_settings(
+    energy_range: tuple[float, float] | None,
+    force_range: tuple[float, float] | None,
+    energy_residual_range: tuple[float, float] | None,
+    force_residual_range: tuple[float, float] | None,
+) -> tuple[tuple[float, float] | None, tuple[float, float] | None, tuple[float, float] | None, tuple[float, float] | None]:
+    print("\nCurrent MLIP plot ranges:")
+    print(f"  Energy/relative-energy main axes: {format_mlip_range(energy_range)}")
+    print(f"  Force main axes:                  {format_mlip_range(force_range)}")
+    print(f"  Energy residual inset:            {format_mlip_range(energy_residual_range)}")
+    print(f"  Force residual inset:             {format_mlip_range(force_residual_range)}")
+    print("Enter two numbers like -0.4 0.4, or leave empty for auto.")
+    energy_range = parse_mlip_axis_range(prompt_text("Energy/relative-energy main-axis range", ""))
+    force_range = parse_mlip_axis_range(prompt_text("Force main-axis range", ""))
+    energy_residual_range = parse_mlip_axis_range(prompt_text("Energy residual range, in meV/atom", ""))
+    force_residual_range = parse_mlip_axis_range(prompt_text("Force residual range, in meV/Å", ""))
+    print("MLIP plot ranges updated.")
+    return energy_range, force_range, energy_residual_range, force_residual_range
 
 
 def interactive_plot_mlip_eval() -> None:
-    print("\n[25] Plot MLIP/DeepMD evaluation parity\n")
-    print(
-        """
+    energy_range: tuple[float, float] | None = None
+    force_range: tuple[float, float] | None = None
+    energy_residual_range: tuple[float, float] | None = None
+    force_residual_range: tuple[float, float] | None = None
+    while True:
+        print("\n[25] Plot MLIP/DeepMD evaluation parity\n")
+        print(
+            f"""
   1) Overview: valid + train energy/force/stress when available
   2) Energy only
   3) Force only
@@ -6485,89 +6508,77 @@ def interactive_plot_mlip_eval() -> None:
   5) Dataset switch: valid or train overview
   6) Train + valid relative energy and force
   7) Freeze model and generate train/valid detail files
-  * After choosing a plot, optional energy/force axis ranges can be entered.
+  8) Set main/residual plot ranges
+     energy axes={format_mlip_range(energy_range)}, force axes={format_mlip_range(force_range)}
+     energy residual={format_mlip_range(energy_residual_range)}, force residual={format_mlip_range(force_residual_range)}
   0) Back to previous menu
 """
-    )
-    choice = prompt_choice("MLIP evaluation plot", ["1", "2", "3", "4", "5", "6", "7", "0"], "1")
-    if choice == "0":
-        return
-    if choice == "7":
-        mode = prompt_choice("Detail datasets", ["both", "valid", "train"], "both")
-        dataset = ["train", "valid"] if mode == "both" else [mode]
-        args = argparse.Namespace(
-            root=Path("."),
-            input=None,
-            model=None,
-            model_stem="frozen_model",
-            dp=DEFAULT_DP,
-            dataset=dataset,
-            overwrite=True,
-            refreeze=False,
         )
-        print("Using defaults: root=., input=input.json, model=frozen_model.pt2, overwrite existing detail files")
-        cmd_make_mlip_detail(args)
-        return
-    energy_range, force_range = interactive_mlip_axis_ranges()
-    if choice == "1":
-        plotted = 0
-        for prefix, outdir in [("valid", Path("mlip_eval_plots")), ("train", Path("mlip_eval_train_plots"))]:
-            if not list(Path(".").glob(f"detail.{prefix}.*.out")):
-                print(f"skip {prefix}: no detail.{prefix}.*.out files in current directory")
-                continue
+        choice = prompt_choice("MLIP evaluation plot", ["1", "2", "3", "4", "5", "6", "7", "8", "0"], "1")
+        if choice == "0":
+            return
+        if choice == "8":
+            energy_range, force_range, energy_residual_range, force_residual_range = interactive_mlip_range_settings(
+                energy_range,
+                force_range,
+                energy_residual_range,
+                force_residual_range,
+            )
+            continue
+        if choice == "7":
+            mode = prompt_choice("Detail datasets", ["both", "valid", "train"], "both")
+            dataset = ["train", "valid"] if mode == "both" else [mode]
+            args = argparse.Namespace(
+                root=Path("."),
+                input=None,
+                model=None,
+                model_stem="frozen_model",
+                dp=DEFAULT_DP,
+                dataset=dataset,
+                overwrite=True,
+                refreeze=False,
+            )
+            print("Using defaults: root=., input=input.json, model=frozen_model.pt2, overwrite existing detail files")
+            cmd_make_mlip_detail(args)
+            return
+        if choice == "1":
+            plotted = 0
+            for prefix, outdir in [("valid", Path("mlip_eval_plots")), ("train", Path("mlip_eval_train_plots"))]:
+                if not list(Path(".").glob(f"detail.{prefix}.*.out")):
+                    print(f"skip {prefix}: no detail.{prefix}.*.out files in current directory")
+                    continue
+                args = argparse.Namespace(
+                    root=Path("."),
+                    out=outdir,
+                    prefix=prefix,
+                    quantity="all",
+                    natoms=None,
+                    data_dir=None,
+                    title=None,
+                    dpi=300,
+                    format="png",
+                    outlier_sigma=4.0,
+                    top_outliers=20,
+                    energy_range=energy_range,
+                    force_range=force_range,
+                    energy_residual_range=energy_residual_range,
+                    force_residual_range=force_residual_range,
+                )
+                print(f"Using defaults: root=., prefix={prefix}, out={outdir}, format=png, dpi=300")
+                cmd_plot_mlip_eval(args)
+                plotted += 1
+            if plotted == 0:
+                die("no detail.valid.*.out or detail.train.*.out files found; use menu 25 -> 7 to generate detail files first")
+            return
+        quantity = {"1": "all", "2": "energy", "3": "force", "4": "stress", "6": "relative-energy"}.get(choice, "all")
+        if choice == "5":
+            prefix = prompt_choice("Detail dataset", ["valid", "train"], "valid")
+            outdir = Path("mlip_eval_plots") if prefix == "valid" else Path("mlip_eval_train_plots")
             args = argparse.Namespace(
                 root=Path("."),
                 out=outdir,
                 prefix=prefix,
                 quantity="all",
-                natoms=None,
-                data_dir=None,
-                title=None,
-                dpi=300,
-                format="png",
-                outlier_sigma=4.0,
-                top_outliers=20,
-                energy_range=energy_range,
-                force_range=force_range,
-            )
-            print(f"Using defaults: root=., prefix={prefix}, out={outdir}, format=png, dpi=300")
-            cmd_plot_mlip_eval(args)
-            plotted += 1
-        if plotted == 0:
-            die("no detail.valid.*.out or detail.train.*.out files found; use menu 25 -> 7 to generate detail files first")
-        return
-    quantity = {"1": "all", "2": "energy", "3": "force", "4": "stress", "6": "relative-energy"}.get(choice, "all")
-    if choice == "5":
-        prefix = prompt_choice("Detail dataset", ["valid", "train"], "valid")
-        outdir = Path("mlip_eval_plots") if prefix == "valid" else Path("mlip_eval_train_plots")
-        args = argparse.Namespace(
-            root=Path("."),
-            out=outdir,
-            prefix=prefix,
-            quantity="all",
-            natoms=None,
-            data_dir=None,
-            input=None,
-            title=None,
-            dpi=300,
-            format="png",
-            outlier_sigma=4.0,
-            top_outliers=20,
-            energy_range=energy_range,
-            force_range=force_range,
-        )
-        print(f"Using defaults: root=., prefix={prefix}, out={outdir}, format=png, dpi=300")
-    elif choice == "6":
-        plotted = 0
-        for prefix, outdir in [("valid", Path("mlip_eval_relative_plots")), ("train", Path("mlip_eval_train_relative_plots"))]:
-            if not list(Path(".").glob(f"detail.{prefix}.*.out")):
-                print(f"skip {prefix}: no detail.{prefix}.*.out files in current directory")
-                continue
-            args = argparse.Namespace(
-                root=Path("."),
-                out=outdir,
-                prefix=prefix,
-                quantity="relative-energy-force",
                 natoms=None,
                 data_dir=None,
                 input=None,
@@ -6578,32 +6589,62 @@ def interactive_plot_mlip_eval() -> None:
                 top_outliers=20,
                 energy_range=energy_range,
                 force_range=force_range,
+                energy_residual_range=energy_residual_range,
+                force_residual_range=force_residual_range,
             )
-            print(f"Using defaults: root=., prefix={prefix}, out={outdir}, quantity=relative-energy-force, input=input.json, format=png, dpi=300")
-            cmd_plot_mlip_eval(args)
-            plotted += 1
-        if plotted == 0:
-            die("no detail.valid.*.out or detail.train.*.out files found; use menu 25 -> 7 to generate detail files first")
+            print(f"Using defaults: root=., prefix={prefix}, out={outdir}, format=png, dpi=300")
+        elif choice == "6":
+            plotted = 0
+            for prefix, outdir in [("valid", Path("mlip_eval_relative_plots")), ("train", Path("mlip_eval_train_relative_plots"))]:
+                if not list(Path(".").glob(f"detail.{prefix}.*.out")):
+                    print(f"skip {prefix}: no detail.{prefix}.*.out files in current directory")
+                    continue
+                args = argparse.Namespace(
+                    root=Path("."),
+                    out=outdir,
+                    prefix=prefix,
+                    quantity="relative-energy-force",
+                    natoms=None,
+                    data_dir=None,
+                    input=None,
+                    title=None,
+                    dpi=300,
+                    format="png",
+                    outlier_sigma=4.0,
+                    top_outliers=20,
+                    energy_range=energy_range,
+                    force_range=force_range,
+                    energy_residual_range=energy_residual_range,
+                    force_residual_range=force_residual_range,
+                )
+                print(f"Using defaults: root=., prefix={prefix}, out={outdir}, quantity=relative-energy-force, input=input.json, format=png, dpi=300")
+                cmd_plot_mlip_eval(args)
+                plotted += 1
+            if plotted == 0:
+                die("no detail.valid.*.out or detail.train.*.out files found; use menu 25 -> 7 to generate detail files first")
+            return
+        else:
+            args = argparse.Namespace(
+                root=Path("."),
+                out=Path("mlip_eval_plots"),
+                prefix="valid",
+                quantity=quantity,
+                natoms=None,
+                data_dir=None,
+                input=None,
+                title=None,
+                dpi=300,
+                format="png",
+                outlier_sigma=4.0,
+                top_outliers=20,
+                energy_range=energy_range,
+                force_range=force_range,
+                energy_residual_range=energy_residual_range,
+                force_residual_range=force_residual_range,
+            )
+            print("Using defaults: root=., prefix=valid, out=mlip_eval_plots, input=input.json, format=png, dpi=300")
+        cmd_plot_mlip_eval(args)
         return
-    else:
-        args = argparse.Namespace(
-            root=Path("."),
-            out=Path("mlip_eval_plots"),
-            prefix="valid",
-            quantity=quantity,
-            natoms=None,
-            data_dir=None,
-            input=None,
-            title=None,
-            dpi=300,
-            format="png",
-            outlier_sigma=4.0,
-            top_outliers=20,
-            energy_range=energy_range,
-            force_range=force_range,
-        )
-        print("Using defaults: root=., prefix=valid, out=mlip_eval_plots, input=input.json, format=png, dpi=300")
-    cmd_plot_mlip_eval(args)
 
 
 def default_deepmd_screen_paths() -> list[Path]:
@@ -7392,6 +7433,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--format", choices=["png", "pdf", "svg"], default="png")
     p.add_argument("--energy-range", nargs=2, type=float, metavar=("MIN", "MAX"), help="axis range for energy and relative-energy parity plots")
     p.add_argument("--force-range", nargs=2, type=float, metavar=("MIN", "MAX"), help="axis range for force parity plots")
+    p.add_argument("--energy-residual-range", nargs=2, type=float, metavar=("MIN", "MAX"), help="residual inset range for energy and relative-energy plots, in meV/atom")
+    p.add_argument("--force-residual-range", nargs=2, type=float, metavar=("MIN", "MAX"), help="residual inset range for force plots, in meV/Å")
     p.add_argument("--outlier-sigma", type=float, default=4.0, help="mark outliers beyond this residual sigma")
     p.add_argument("--top-outliers", type=int, default=20, help="top residual rows exported per quantity")
     p.set_defaults(func=cmd_plot_mlip_eval)
