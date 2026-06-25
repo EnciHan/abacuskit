@@ -433,6 +433,7 @@ def _panel_color(quantity: QuantityData, default_color: str) -> str:
 
 
 def _panel(fig, spec, quantity: QuantityData, color: str, letter: str | None = None) -> None:
+    from matplotlib.ticker import LinearLocator
     from mpl_toolkits.axes_grid1 import make_axes_locatable
     from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
@@ -454,6 +455,8 @@ def _panel(fig, spec, quantity: QuantityData, color: str, letter: str | None = N
     ax.set_aspect("equal", adjustable="box")
     ax.set_xlabel(f"{quantity.ref_label} ({quantity.axis_unit})")
     ax.set_ylabel(f"{quantity.pred_label} ({quantity.axis_unit})")
+    ax.xaxis.set_major_locator(LinearLocator(5))
+    ax.yaxis.set_major_locator(LinearLocator(5))
     ax.tick_params(direction="in")
 
     metrics = _metrics(quantity)
@@ -479,7 +482,7 @@ def _panel(fig, spec, quantity: QuantityData, color: str, letter: str | None = N
     ax_right.hist(pred, bins=bins, range=_hist_range(pred), orientation="horizontal", color=panel_color, alpha=0.45)
     ax_right.axis("off")
 
-    inset = inset_axes(ax, width="32%", height="28%", loc="lower right", borderpad=1.2)
+    inset = inset_axes(ax, width="32%", height="28%", loc="lower right", borderpad=2.0)
     res_scale = _metric_scale(quantity)
     residual_plot = residual * res_scale
     inset.hist(
