@@ -20,6 +20,8 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import urllib.request
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from pathlib import Path
@@ -4637,6 +4639,69 @@ def cmd_plot_mlip_eval(args) -> None:
     print(f"wrote outliers {result['outliers_csv']}")
 
 
+MICROSOFT_ARIAL_URL = "https://downloads.sourceforge.net/corefonts/arial32.exe"
+
+
+def _fontconfig_has_arial() -> bool:
+    fc_match = shutil.which("fc-match")
+    if not fc_match:
+        return False
+    result = subprocess.run([fc_match, "-v", "Arial"], text=True, capture_output=True, check=False)
+    return result.returncode == 0 and 'family: "Arial"' in result.stdout
+
+
+def _extract_core_font_archive(archive: Path, out_dir: Path) -> None:
+    extractor = shutil.which("7z")
+    if extractor:
+        subprocess.run([extractor, "e", "-y", str(archive), f"-o{out_dir}"], check=True)
+        return
+    extractor = shutil.which("cabextract")
+    if extractor:
+        subprocess.run([extractor, "-d", str(out_dir), str(archive)], check=True)
+        return
+    die("installing Arial needs 7z or cabextract available in PATH")
+
+
+def cmd_install_fonts(args) -> None:
+    if not args.arial:
+        die("choose a font to install, for example: abacuskit install-fonts --arial")
+    target_dir = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "fonts" / "msttcorefonts"
+    existing = sorted(target_dir.glob("Arial*.TTF")) + sorted(target_dir.glob("arial*.ttf"))
+    if existing and not args.force:
+        print(f"Arial font files already exist under {target_dir}")
+        if _fontconfig_has_arial():
+            print("fontconfig already resolves Arial.")
+        else:
+            fc_cache = shutil.which("fc-cache")
+            if fc_cache:
+                subprocess.run([fc_cache, "-f", str(target_dir)], check=False)
+                print("refreshed fontconfig cache.")
+        return
+    target_dir.mkdir(parents=True, exist_ok=True)
+    print("Downloading Microsoft Core Fonts Arial package.")
+    print("By continuing, make sure your use complies with the Microsoft Core Fonts license.")
+    with tempfile.TemporaryDirectory(prefix="abacuskit-arial-") as tmp:
+        tmp_dir = Path(tmp)
+        archive = tmp_dir / "arial32.exe"
+        extract_dir = tmp_dir / "extract"
+        extract_dir.mkdir()
+        urllib.request.urlretrieve(args.url, archive)
+        _extract_core_font_archive(archive, extract_dir)
+        fonts = sorted(extract_dir.glob("Arial*.TTF")) + sorted(extract_dir.glob("arial*.ttf"))
+        if not fonts:
+            die("downloaded Arial archive did not contain Arial TTF files")
+        for font in fonts:
+            shutil.copy2(font, target_dir / font.name)
+    fc_cache = shutil.which("fc-cache")
+    if fc_cache:
+        subprocess.run([fc_cache, "-f", str(target_dir)], check=False)
+    print(f"installed Arial fonts under {target_dir}")
+    if _fontconfig_has_arial():
+        print("fontconfig now resolves Arial.")
+    else:
+        print("Arial files were installed, but fontconfig did not resolve Arial yet; restart the shell or rerun fc-cache.")
+
+
 def deepmd_frame_count(system: Path) -> int:
     total = 0
     for set_dir in sorted(system.expanduser().glob("set.*")):
@@ -6962,6 +7027,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--root", type=Path, default=DEFAULT_ABACUS_ROOT)
     p.add_argument("--json", type=Path, help="write version list to JSON")
     p.set_defaults(func=cmd_abacus_versions)
+
+    p = sub.add_parser("install-fonts", help="install optional user fonts for publication plots")
+    p.add_argument("--arial", action="store_true", help="download and install Arial to the user font directory")
+    p.add_argument("--force", action="store_true", help="reinstall even if Arial font files already exist")
+    p.add_argument("--url", default=MICROSOFT_ARIAL_URL, help="Arial core-font archive URL")
+    p.set_defaults(func=cmd_install_fonts)
 
     p = sub.add_parser("cif2stru", help="convert a CIF file to ABACUS STRU")
     p.add_argument("cif", type=Path)

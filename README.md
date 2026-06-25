@@ -82,6 +82,14 @@ pip install "abacuskit[plot]"      # BAND/DOS/PDOS/LDOS/ELF/电荷密度绘图
 pip install "abacuskit[deepmd]"    # collect-deepmd 数据转换
 ```
 
+出图默认优先使用 Arial；如果系统没有 Arial，会自动回退到兼容字体并避免 Matplotlib 字体警告。需要安装 Arial 到当前用户字体目录时，可主动执行：
+
+```bash
+abacuskit install-fonts --arial
+```
+
+该命令需要联网，并依赖系统中有 `7z` 或 `cabextract` 用于解包 Microsoft Core Fonts 的 Arial 包。普通 `pip install` 不会自动下载字体。
+
 安装后检查入口：
 
 ```bash

@@ -21,6 +21,7 @@ JOURNAL_AXES_LINEWIDTH = 1.2
 JOURNAL_TICK_WIDTH = 1.0
 EFERMI_RELATIVE_LABEL = r"$\mathbf{E}-\mathbf{E}_{\mathbf{F}}$ (eV)"
 _ARIAL_FONTS_REGISTERED = False
+_JOURNAL_FONT_FAMILY: str | None = None
 
 
 def register_arial_fonts() -> None:
@@ -53,6 +54,26 @@ def register_arial_fonts() -> None:
     _ARIAL_FONTS_REGISTERED = True
 
 
+def journal_font_family() -> str:
+    """Return the best available journal font without triggering findfont warnings."""
+    from matplotlib import font_manager
+    from matplotlib.font_manager import FontProperties
+
+    global _JOURNAL_FONT_FAMILY
+    if _JOURNAL_FONT_FAMILY is not None:
+        return _JOURNAL_FONT_FAMILY
+    register_arial_fonts()
+    for family in ["Arial", "Nimbus Sans", "Liberation Sans", "DejaVu Sans"]:
+        try:
+            font_manager.findfont(FontProperties(family=family), fallback_to_default=False)
+        except ValueError:
+            continue
+        _JOURNAL_FONT_FAMILY = family
+        return family
+    _JOURNAL_FONT_FAMILY = "DejaVu Sans"
+    return _JOURNAL_FONT_FAMILY
+
+
 def mm_to_inch(mm):
     """Convert millimetres to inches; accepts a scalar or an iterable."""
     if isinstance(mm, (str, bytes)):
@@ -67,17 +88,17 @@ def set_journal_style() -> None:
     """Apply compact publication-oriented Matplotlib rcParams."""
     import matplotlib as mpl
 
-    register_arial_fonts()
+    font_family = journal_font_family()
     mpl.rcParams.update(
         {
-            "font.family": "Arial",
-            "font.sans-serif": ["Arial"],
+            "font.family": font_family,
+            "font.sans-serif": [font_family],
             "mathtext.fontset": "custom",
-            "mathtext.rm": "Arial",
-            "mathtext.it": "Arial:italic",
-            "mathtext.bf": "Arial:bold",
-            "mathtext.cal": "Arial",
-            "mathtext.sf": "Arial",
+            "mathtext.rm": font_family,
+            "mathtext.it": f"{font_family}:italic",
+            "mathtext.bf": f"{font_family}:bold",
+            "mathtext.cal": font_family,
+            "mathtext.sf": font_family,
             "font.size": 8,
             "axes.labelsize": 9,
             "xtick.labelsize": 8,
