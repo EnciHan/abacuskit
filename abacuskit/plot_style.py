@@ -273,3 +273,17 @@ def style_legend(ax, **kwargs):
     legend_kwargs = {"frameon": False, "fontsize": 8, "loc": "best"}
     legend_kwargs.update(kwargs)
     return ax.legend(**legend_kwargs)
+
+
+def style_pdos_legend(ax, **kwargs):
+    """Place PDOS orbital legends in one right-aligned in-axes column."""
+    legend_kwargs = {
+        "frameon": False,
+        "prop": {"family": journal_font_family(), "size": 8},
+        "loc": "upper right",
+        "bbox_to_anchor": (0.98, 0.98),
+        "borderaxespad": 0.0,
+        "ncol": 1,
+    }
+    legend_kwargs.update(kwargs)
+    return style_legend(ax, **legend_kwargs)

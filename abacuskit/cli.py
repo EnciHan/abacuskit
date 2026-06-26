@@ -36,14 +36,14 @@ try:
     from . import __affiliation__, __author__, __version__
     from .bader import run_bader_analysis, write_bader_csv, write_bader_json
     from .cohp import build_orbital_map, format_orbital_map, resolve_orbital_arguments, run_cohp
-    from .plot_style import EFERMI_RELATIVE_LABEL, add_square_map_axes, get_figsize, hide_xy_axis_title_and_ticks, save_journal_figure, set_journal_style, style_colorbar, style_grid, style_legend, style_map_axes
+    from .plot_style import EFERMI_RELATIVE_LABEL, add_square_map_axes, get_figsize, hide_xy_axis_title_and_ticks, save_journal_figure, set_journal_style, style_colorbar, style_grid, style_legend, style_map_axes, style_pdos_legend
 except ImportError:
     __version__ = "v1.3.1"
     __author__ = "Han Enci, Zhong Lisheng, Yu Yutong, Xu Mengting, Chen Jingyuan"
     __affiliation__ = "Xi'an University of Technology"
     from bader import run_bader_analysis, write_bader_csv, write_bader_json
     from cohp import build_orbital_map, format_orbital_map, resolve_orbital_arguments, run_cohp
-    from plot_style import EFERMI_RELATIVE_LABEL, add_square_map_axes, get_figsize, hide_xy_axis_title_and_ticks, save_journal_figure, set_journal_style, style_colorbar, style_grid, style_legend, style_map_axes
+    from plot_style import EFERMI_RELATIVE_LABEL, add_square_map_axes, get_figsize, hide_xy_axis_title_and_ticks, save_journal_figure, set_journal_style, style_colorbar, style_grid, style_legend, style_map_axes, style_pdos_legend
 
 BOHR_PER_ANGSTROM = 1.88972612546
 USER_CONFIG_PATH = Path.home() / ".abacuskit" / "config.json"
@@ -200,17 +200,17 @@ DEFAULT_DP = env_path("ABACUSKIT_DP", "dp")
 ORBITAL_LABEL_TO_L = {"s": 0, "p": 1, "d": 2, "f": 3, "g": 4}
 L_TO_ORBITAL_LABEL = {v: k for k, v in ORBITAL_LABEL_TO_L.items()}
 ORBITAL_COLORS = {
-    "s": "#1f77b4",
-    "p": "#d62728",
-    "d": "#2ca02c",
-    "f": "#9467bd",
-    "g": "#8c564b",
+    "s": "#9ECAE1",
+    "p": "#74C476",
+    "d": "#FDAE6B",
+    "f": "#BCBDDC",
+    "g": "#969696",
 }
 DEFAULT_PDOS_SELECTORS = [("C", "p"), ("N", "p"), ("Ru", "d")]
 PDOS_CHANNEL_COLORS = {
-    ("C", "p"): "#1f77b4",
-    ("N", "p"): "#ff7f0e",
-    ("Ru", "d"): "#2ca02c",
+    ("C", "p"): "#9ECAE1",
+    ("N", "p"): "#74C476",
+    ("Ru", "d"): "#FDAE6B",
 }
 DOS_PLOT_EMIN = -10.0
 DOS_PLOT_EMAX = 8.0
@@ -3116,8 +3116,8 @@ def plot_ldos_matrix(
     profile = np.nanmean(data, axis=0)
     x = energy if energy.size == profile.size else np.arange(profile.size, dtype=float)
     fig, ax = plt.subplots(figsize=get_figsize("single"), constrained_layout=True)
-    ax.plot(x, profile, lw=1.5, color="#1f77b4", label="path-averaged LDOS")
-    ax.fill_between(x, profile, 0.0, color="#1f77b4", alpha=0.25, linewidth=0)
+    ax.plot(x, profile, lw=1.5, color="#9ECAE1", label="path-averaged LDOS")
+    ax.fill_between(x, profile, 0.0, color="#9ECAE1", alpha=0.25, linewidth=0)
     if xlabel.startswith("Energy"):
         ax.axvline(0.0, lw=0.8, ls="--", color="0.25")
     ax.set_xlabel(xlabel)
@@ -3168,15 +3168,15 @@ def plot_ldos_cube(
         order = np.argsort(np.array(biases))
         x = np.array(biases, dtype=float)[order]
         y = np.array(averages, dtype=float)[order]
-        ax.plot(x, y, lw=1.5, color="#1f77b4", marker="o", label="cell-averaged LDOS")
-        ax.fill_between(x, y, 0.0, color="#1f77b4", alpha=0.25, linewidth=0)
+        ax.plot(x, y, lw=1.5, color="#9ECAE1", marker="o", label="cell-averaged LDOS")
+        ax.fill_between(x, y, 0.0, color="#9ECAE1", alpha=0.25, linewidth=0)
         ax.set_xlabel("Bias (eV)")
         ax.set_ylabel("Average LDOS")
     else:
         center_line = plane[:, plane.shape[1] // 2]
         x = np.arange(center_line.size, dtype=float)
-        ax.plot(x, center_line, lw=1.5, color="#1f77b4", label="center-line LDOS")
-        ax.fill_between(x, center_line, 0.0, color="#1f77b4", alpha=0.25, linewidth=0)
+        ax.plot(x, center_line, lw=1.5, color="#9ECAE1", label="center-line LDOS")
+        ax.fill_between(x, center_line, 0.0, color="#9ECAE1", alpha=0.25, linewidth=0)
         ax.set_xlabel("grid x")
         ax.set_ylabel("LDOS")
     ax.set_title(f"LDOS curve: {cube_file.name}")
@@ -3490,7 +3490,7 @@ def cmd_plot_band_pdos(args) -> None:
     pdos_ax.set_ylim(args.emin, args.emax)
     pdos_ax.set_xlim(0.0, pdos_xmax)
     if not args.no_legend and orbital_pdos:
-        style_legend(pdos_ax)
+        style_pdos_legend(pdos_ax)
 
     save_journal_figure(fig, args.out, export_pdf=True)
     plt.close(fig)
@@ -3578,7 +3578,7 @@ def cmd_plot_dos(args) -> None:
         ax.set_xlim(DOS_PLOT_EMIN, DOS_PLOT_EMAX)
         ax.set_xlabel(xlabel)
         ax.set_ylabel("PDOS")
-        style_legend(ax, ncol=2)
+        style_pdos_legend(ax)
         style_grid(ax)
         save_journal_figure(fig, args.out, export_pdf=True)
         plt.close(fig)
@@ -4168,9 +4168,9 @@ def write_elf_line_profile(
 
     set_journal_style()
     fig, ax = plt.subplots(figsize=get_figsize("single"), constrained_layout=True)
-    ax.plot(distance, nearest, color="0.65", lw=1.0, label="Nearest grid")
-    ax.plot(distance, linear, color="#1f77b4", lw=1.35, label="Linear")
-    ax.plot(distance, cubic, color="#d62728", lw=1.35, label="Cubic")
+    ax.plot(distance, nearest, color="#808080", lw=1.0, label="Nearest grid")
+    ax.plot(distance, linear, color="#9ECAE1", lw=1.35, label="Linear")
+    ax.plot(distance, cubic, color="#74C476", lw=1.35, label="Cubic")
     ax.grid(False)
     ax.set_xlim(0.0, float(distance[-1]))
     ax.set_ylim(0.0, 1.02)
